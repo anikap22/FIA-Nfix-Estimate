@@ -1,0 +1,209 @@
+---
+title: "Previous Estimates"
+author: "Anika Petach"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = '/Users/Anika/Documents/GradSchool/FIA_EstimateProj/')
+usha <- 747726000
+worldha <- 14842900000
+forestha <- 209230873 #hectares forest in US (from FIA)
+forestprop <- 0.28 #proportion of forest/land in US from FIA 1997 estimate
+```
+
+## This file:
+calculates coterminous US, tree SNF only from other studies  
+Vitousek (2013), Cleveland (1999), Cleveland (2013), Galloway (2004)  
+8/30/18
+
+## Constants used:
+
+- land area of the world: 148429000 km^2^ = 14842900000 hectares = 1.48429e14 m^2^ (`worldha <- 14842900000`)
+- forest proportion in the US: 28% (`forestprop <- 0.28`). From forest area / land area
+- forest area from my analysis (map.R): 209230873 ha (`forestha <- 209230873`). Smaller than from FIA report because didn't include HI, PR, or most of AK
+- land area from my analysis (map.R): 747726000 ha (`usha <- 747726000`). 
+
+## Alternate constants from research (not used):
+These constants give a ballpark to see if the numbers reported sound reasonable.  
+- from internet research: land area of the conterminous US: 9147593 km^2^ = 914759300 hectares = 9.147593e+12 m^2^  
+- from FIA report: forest area in the US: 302e6 hectares  
+- from FIA report: forest proportion in the US: 33%  proportion of forest/land in US from FIA 1997 estimate
+
+## Vitousek (2013):
+58 TgN/year (40-100) globally  
+Asymbiotic + symbiotic  
+Pre-industria  
+Forest and non-forest (all land)
+```{r vitousek-2013}
+vit13 <- 58
+#get proportion land area in US/world
+landprop <- usha/worldha
+
+#get proportion symbiotic/asymbiotc
+symbprop <- 0.76 #from forest biomes in Cleveland 2013
+
+#get proportion trees/understory
+treeprop <- 0.75 #random guess
+
+vit13us <- vit13*landprop*symbprop*treeprop*forestprop
+print(vit13us) #TgN/yr
+
+##Fixation per land area
+vitland <- (vit13us/usha)*1e9 #kgN/ha/yr
+print(vitland)
+
+##Fixation per forest area
+vitfor <- (vit13us/forestha)*1e9 #kgN/ha/yr
+print(vitfor)
+```
+### Results:
+There were **`r toString(vit13us)` TgN/yr**fixed under this estimate. Fixation per land area = **`r toString(vitland)` kgN/ha/yr** and fixation per forest area = **`r toString(vitfor)` kgN/ha/yr**. This should be the lowest of all estimates because it's the smallest value and encompasses a lot.
+
+### Note from FIA about forest area:
+In 1997, 302 million hectares- or 33 percent of the total land area of the United States- was in forest land. Today's forest land area amounts to about 70 percent of the area that was forested in 1630. Since 1630, about 120 million hectares of forest land have been converted to other uses-mainly agricultural.
+
+## Cleveland (2013):
+128 TgN/year globally  
+Asymbiotic + symbiotic?  
+Current?  
+Forest only 
+
+### Forest biomes:
+
+| Biome | symbiotic BNF (TgN/yr) | global biome area (Mkm^2^) | US biome area (Mkm^2^) |
+|----------------|-----------------------------------------------------------------------|---------------------------------------------------------|-------------------------------------|
+| DBF | 2.24 | 1.12 | 0.419 |
+| DNF | 0.02 | 1.62 | 0 |
+| EBF | 38 | 16.21 | 0.012 |
+| ENF | 0.3 | 6.17 | 0.423 |
+| MIX | 2.1 | 7.46 | 0.612 |
+The US biome area was obtained using land cover data from the University of Maryland processed in ArcGIS using zonal statistics. For details see: `C:\Users\Anika\Documents\GradSchool\FIA_EstimateProj`
+
+```{r cleveland-2013, message=FALSE, warning=FALSE}
+require(kableExtra)
+require(dplyr)
+## Method 1 from biome classes
+#Input data
+biomes <- c("DBF","DNF","EBF","ENF","MIX")
+bnf <- c(2.24,0.02,38,0.3,2.1)
+globala <- c(1.12,1.62,16.21,6.17,7.46)
+usaa <- c(0.419,0,0.012,0.423,0.612)
+cdata <- as.data.frame(cbind(biomes=as.factor(biomes),
+                             bnf=as.numeric(bnf),
+                             globala=as.numeric(globala),
+                             usaa=as.numeric(usaa)))
+cdata$bnfusa <- cdata$bnf*(cdata$usaa/cdata$globala)
+
+knitr::kable(cdata)
+
+clev13us1 <- sum(cdata$bnfusa)
+clev13us1 #TgN/yr
+
+## Method2 from land area scaling
+clev13 <- 128
+
+#get proportion land area in US/world
+landprop <- usha/worldha
+
+#get proportion symbiotic/asymbiotc
+symbprop <- 0.76 #from forest biomes in Cleveland 2013
+
+clev13us2 <- clev13*landprop*symbprop*forestprop
+clev13us2 #TgN/yr
+
+##Fixation per land area
+clev13land <- (clev13us2/usha)*1e9 #kgN/ha/yr
+print(clev13land)
+
+##Fixation per forest area
+clev13for <- (clev13us2/forestha)*1e9 #kgN/ha/yr
+print(clev13for)
+```
+
+### Results:
+From scaling by biome type there were **`r toString(clev13us1)` TgN/yr** fixed and by scaling from land area proprotions there were **`r toString(clev13us2)` TgN/yr** fixed. The fixation per land area = **`r toString(clev13land)` kgN/ha/yr** and the fixation per forest area = **`r toString(clev13for)` kgN/ha/yr**. This estimate should be between the Vitousek and Cleveland 1999 estimates.
+
+## Cleveland (1999):
+195 TgN/year globally  
+Asymbiotic + symbiotic  
+Current?  
+Forest and non-forest
+```{r cleveland-1999}
+## Method 1 from biome class
+tempforbnf <- 16.04 #kgN/ha/yr
+
+clev99us1 <- (tempforbnf*forestha)/1e9 #calc and convert kg to Tg
+clev99us1 #TgN/yr
+
+## Method2 from land area scaling
+clev99 <- 195
+
+#get proportion land area in US/world
+landprop <- usha/worldha
+
+#get proportion symbiotic/asymbiotc
+symbprop <- 0.76 #from forest biomes in Cleveland 2013
+
+clev99us2 <- clev99*landprop*symbprop*forestprop
+clev99us2 #TgN/yr
+
+##Fixation per land area
+clev99land <- (clev99us2/usha)*1e9 #kgN/ha/yr
+print(clev99land)
+
+##Fixation per forest area
+clev99for <- (clev99us2/forestha)*1e9 #kgN/ha/yr
+print(clev99for)
+```
+
+### Results:
+From scaling by biomes there were **`r toString(clev99us1)` TgN/yr** fixed and when scaling from land area there were **`r toString(clev99us2)` TgN/yr** fixed. The fixation per land area = **`r toString(clev99land)` kgN/ha/yr** and the fixation per forest area = **`r toString(clev99for)` kgN/ha/yr**.
+
+## Galloway (2004):
+107 TgN/year (present day)  
+128 TgN/year (pre-disturbance/pre-industrial)  
+global  
+terrestrial (forest/non-forest)  
+used 5% N fixer cover from Cleveland 1999
+
+```{r galloway-2004}
+## from land area scaling
+gal04 <- 107
+
+#get proportion land area in US/world
+landprop <- usha/worldha
+
+#get proportion symbiotic/asymbiotc
+symbprop <- 0.76 #from forest biomes in Cleveland 2013
+
+gal04us <- gal04*landprop*symbprop*forestprop
+gal04us #TgN/yr
+
+##Fixation per land area
+gal04land <- (gal04us/usha)*1e9 #kgN/ha/yr
+print(gal04land)
+
+##Fixation per forest area
+gal04for <- (gal04us/forestha)*1e9 #kgN/ha/yr
+print(gal04for)
+```
+
+### Results:
+Based on land area scaling **`r toString(gal04us)` TgN/yr** were fixed. Fixation per land area = **`r toString(gal04land)` kgN/ha/yr** and fixation per forest area = **`r toString(gal04for)` kN/ha/yr**. 
+
+## This estimate:
+
+```{r anika}
+accretion <- 0.38 #TgN/yr
+ndfa <- 0.304 #TgN/yr
+
+##Fixation per land area
+(accretion/usha)*1e9 #kgN/ha/yr
+(ndfa/usha)*1e9 #kgN/ha/yr
+
+##Fixation per forest area
+(accretion/forestha)*1e9 #kgN/ha/yr
+(ndfa/forestha)*1e9 #kgN/ha/yr
+```

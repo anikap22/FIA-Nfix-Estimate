@@ -1,0 +1,2585 @@
+---
+title: "fia-estimate"
+author: "Anika Petach"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = '/Users/Anika/Documents/GradSchool/FIA_EstimateProj/')
+```
+
+## R Markdown
+
+This combines all of the FIA Estimate project analysis into one place from the scripts that were written to try to find the issues with the analysis and to communicate to collaborators.
+
+## Set up:
+Load packages, set wd
+```{r setup}
+# load packages
+library(dplyr)
+library(data.table)
+library(reshape2)
+```
+
+## No Repeats:
+Remove repeated plot measurements due to time series (keep most recent from ts if applicable).
+
+```{r no-repeats, message=FALSE, warning=FALSE}
+# load in tree data.
+t <- read.csv("ACGCA_FIAv51_from_JWL/ACGCA_FIAv51_tree.csv", header=TRUE)
+
+# load in tree time series data.
+ts <- read.csv("ACGCA_FIAv51_from_JWL/ACGCA_FIAv51_tree_ts.csv", header=TRUE) # Load in tree time series data
+
+ts1 <- ts[,c(2:5)]
+
+#set -999 as NA
+ts1$tcn4[ts1$tcn4==-999] <- NA
+ts1$tcn3[ts1$tcn3==-999] <- NA
+ts1$tcn2[ts1$tcn2==-999] <- NA
+ts1$tcn1[ts1$tcn1==-999] <- NA
+
+# select most recent plot (will keep these and delete all other tcns from t)
+keept <- melt(as.data.table(ts1, keep.rownames = TRUE), 
+     id.vars = "rn", na.rm = TRUE)[, value[.N], by = rn]
+
+tslist <- as.list(c(ts1$tcn1, ts1$tcn2, ts1$tcn3, ts1$tcn4))
+dropt <- tslist[!(tslist %in% keept$V1)]
+
+sum(is.na(dropt)) #NAs in dropt to check correct # rows
+
+# subset tree dataframe
+ft <- t[,c(1,2,4,6,9,11,16,17)] #pcn, tcn, spcd, dbh, cclcd, agb, tpha
+ft <- ft[ft$state!='PR'&ft$state!='VI'&ft$state!='HI', ] #remove islands
+
+t0 <- filter(ft, !(tcn %in% dropt))
+print(head(t0))
+
+#setwd("/Users/Anika/Documents/GradSchool/FIA_EstimateProj/data")
+#saveRDS(t0, "t0.RDS")
+
+```
+
+## Fixation rate data:
+Load data from the literature review to use in bootstrapping analysis.
+
+```{r fixation-rate, message=FALSE, warning=FALSE}
+#data from literature review (same as in bootstrapping)
+#load data
+acacia <- data.frame(BA=c(5.1,22.7,8.75,2.496),
+                     rate=c(50,112,5.25,60))
+print(acacia)
+alnus <- data.frame(BA=c(1.40,21.95,8.94,6.47,2.49,19.8,35.8),
+                    rate=c(17,150,57.29,86.44,61.49,164,320))
+print(alnus)
+prosopis <- data.frame(BA=c(0.101,0.33,0.17,0.40,0.75,0.82),
+                       rate=c(0.4,1.8,0.5,2,1.1,1.7))
+print(prosopis)
+robinia <- data.frame(BA=c(8.2,32.1,52.1,27.75,26.41,16.98),
+                      rate=c(48,75,33,112.3,23.2,110))
+print(robinia)
+other <- rbind(acacia, alnus, prosopis, robinia)
+
+#regression, get mean and SE
+ac <- lm(rate ~ BA, data=acacia)
+ac.mu <- summary(ac)$coefficients[2,1]
+ac.se <- summary(ac)$coefficients[2,2]
+ac.int <- summary(ac)$coefficients[1,1]
+ac.ints <- summary(ac)$coefficients[1,2]
+
+al <- lm(rate ~ BA, data=alnus)
+al.mu <- summary(al)$coefficients[2,1]
+al.se <- summary(al)$coefficients[2,2]
+al.int <- summary(al)$coefficients[1,1]
+al.ints <- summary(al)$coefficients[1,2]
+
+pr <- lm(rate ~ BA, data=prosopis)
+pr.mu <- summary(pr)$coefficients[2,1]
+pr.se <- summary(pr)$coefficients[2,2]
+pr.int <- summary(pr)$coefficients[1,1]
+pr.ints <- summary(pr)$coefficients[1,2]
+
+ro <- lm(rate ~ BA, data=robinia)
+#ro.mu <- mean(robinia$rate)
+#ro.se <- sd(robinia$rate)/sqrt(nrow(robinia))
+ro.mu <- summary(ro)$coefficients[2,1]
+ro.se <- summary(ro)$coefficients[2,2]
+ro.int <- summary(ro)$coefficients[1,1]
+ro.ints <- summary(ro)$coefficients[1,2]
+
+other.mu <- mean(ac.mu, al.mu, pr.mu, ro.mu)
+other.se <- sqrt(ro.se^2+pr.se^2+al.se^2+ac.se^2)
+other.int <- (ac.int + al.int + pr.int + ro.int)/4
+other.ints <- sqrt(ro.ints^2+pr.ints^2+al.ints^2+ac.ints^2)
+```
+
+
+## Clean Saplings:
+This script loads the seedling data and cleans it. Then it calculates BNF rates for seedlings using the rates for mature trees (maybe that is the wrong thing to do).
+
+```{r clean-saplings, message=FALSE, warning=FALSE}
+sap <- read.csv("data/SEEDLING.csv",header=T)
+
+#########
+#Assign fixing status
+fixer <- read.csv("data/FIA_Fixer_spcd.csv", header=T) 
+sap_spcd <- merge(sap, fixer, by.x="SPCD", by.y="SPCD", all.x=TRUE, all.y=FALSE)
+sap_spcd[is.na(sap_spcd$FIX),]$FIX <- 0
+sap_spcd <- sap_spcd[,c(1:5,6,7,13,14,22,33:36)]
+
+##########
+# load in plot data.
+p <- read.csv("ACGCA_FIAv51_from_JWL/ACGCA_FIAv51_plot.csv",header=T)
+ffp <- p[,c(1,2,3,5,6,7,8,9)] # pcn (plot number), meastime, lat, lon, elev, stdage(stand age), xmh
+sdata <- merge(ffp, sap_spcd, by.x="pcn", by.y="PLT_CN", all.x=FALSE, all.y=TRUE) 
+
+sdata_fp_pcn <- unique(sdata[sdata$FIX==1,]$pcn) #unique plot number with fixer present
+sdata_fp <- data.frame(pcn=sdata_fp_pcn, fixer_present=1)
+sdata_fp1 <- merge(sdata_fp, sdata, by.x="pcn", by.y="pcn", all.x=TRUE, all.y=TRUE)
+sdata_fp2 <- sdata_fp1[!is.na(sdata_fp1$fixer_present),]
+
+sdata <- sdata_fp1[sdata_fp1$state!='PR'&sdata_fp1$state!='VI'&sdata_fp1$state!='HI', ] #why didn't we use gdata_fp2?
+#sdata[sdata$tpha==-999,]$TPA_UNADJ <- median(sdata[sdata$tpha!=-999,]$TPA_UNADJ)
+
+# clear up memory
+rm(sap, sap_spcd, ffp, sdata_fp_pcn, sdata_fp, sdata_fp1, sdata_fp2)
+
+##########
+# get total number of fixers (for some reason there are tons of na rows)
+notna <- sdata[!is.na(sdata$Genus),]
+nrow(notna)
+
+# get total number of fixers using treecount
+notna2 <- notna[!is.na(notna$TREECOUNT),]
+counts <- notna %>%
+  group_by(Genus) %>%
+  summarize(sum(TREECOUNT,na.rm=T))
+colnames(counts) <- c("Genus","numstem")
+sum(counts$numstem)
+
+dbhcm <- sqrt(2.54*12.7)
+dbhm <- dbhcm/100
+
+sdatat <- sdata[!is.na(sdata$TREECOUNT),]
+sdatat[sdatat$TREECOUNT==999,]$TREECOUNT <- NA
+
+sdata_pl <- sdatat %>%
+  mutate(tpha=TPA_UNADJ*0.404686, 
+         BAm2ha=(dbhm/2)^2*3.14*TREECOUNT*tpha)
+
+print(head(sdata_pl))
+
+################## bootstrap F
+# Robinia fixed rate: rnorm(1,mean(robinia$rate),var(robinia$rate)^(0.5)) 
+# Robinia varying rate: rnorm(1,ro.mu,ro.se)*plotBA+ro.int
+# filter(notna2, FIX==1)
+plot_fixs <- sdata_pl %>% 
+  group_by(pcn, Genus) %>%
+  summarize(plotBA=sum(BAm2ha,na.rm=T), cnt=n()) %>%
+  mutate(fix.s = ifelse(Genus %in% c("Acacia"), rnorm(1,ac.mu,ac.se)*plotBA+ac.int, 
+                        ifelse(Genus %in% c("Albizia"), rnorm(1,other.mu,other.se)*plotBA+other.int,
+                               ifelse(Genus %in% c("Alnus"), rnorm(1,al.mu,al.se)*plotBA+al.int,
+                                      ifelse(Genus %in% c("Cercocarpus"), rnorm(1,other.mu,other.se)*plotBA+other.int,
+                                             ifelse(Genus %in% c("Prosopis"), rnorm(1,pr.mu,pr.se)*plotBA+pr.int, 
+                                                    ifelse(Genus %in% c("Ebenopsis"), rnorm(1,other.mu,other.se)*plotBA+other.int,
+                                                           ifelse(Genus %in% c("Robinia"), rnorm(1,mean(robinia$rate),var(robinia$rate)^(0.5)),
+                                                                  ifelse(Genus %in% c("Olneya"), rnorm(1,other.mu,other.se)*plotBA+other.int,
+                                                                         ifelse(Genus %in% c("Elaeagnus"), rnorm(1,other.mu,other.se)*plotBA+other.int,
+                                                                                0))))))))))
+
+print(head(plot_fixs))
+
+numplots <- length(unique(sdata_pl$pcn))
+print(numplots) #number of plots
+
+test <- plot_fixs %>% 
+  group_by(pcn) %>%
+  summarize(pfix=sum(fix.s,na.rm=T), sumBA=sum(plotBA,na.rm=T)) #add total basal area to this as well
+
+test1 <- plot_fixs %>% 
+  filter(!is.na(Genus)) %>%
+  group_by(pcn) %>%
+  summarize(fixerBA=sum(plotBA,na.rm=T)) #add total basal area to this as well
+
+totals <- mean(test$pfix)*2428.114*numplots
+print(totals) #N fixed across continent by seedlings
+
+sum(sdata_pl$TREECOUNT*sdata_pl$FIX, na.rm=T) #number of nfixing stems
+
+#saveRDS(sdata_pl, "output/saplingdata.RDS")
+
+# get stem counts of each genus
+fixers <- filter(sdata_pl, FIX==1)
+fixers %>%
+  group_by(Genus) %>%
+  summarize(cnt=sum(TREECOUNT,na.rm=T))
+
+rm(fixers,test,test1)
+
+```
+
+## Clean Mature Trees:
+This cleans that data for mature trees dbh >= 12.7 cm. The output is the gdata RDS which is used frequently throughout the analysis. Much of this section was adapted from Wenying Liao. 
+
+```{r clean-trees}
+gc()
+#t0 <- readRDS("data/t0.RDS")
+
+######### Step2: remove islands, assign regions
+regions <- read.csv("data/FIA_regions.csv", header=TRUE)
+t0 <- t0[t0$state!='PR'&t0$state!='VI'&t0$state!='HI', ]
+ft <- merge(t0, regions[,c(1,2)], by.x="state", by.y="State.Abb",
+            all.x=TRUE,all.y=FALSE, sort=FALSE)
+
+######### Step3: Assign fixing status
+fixer <- read.csv("data/FIA_Fixer_spcd.csv", header=T) 
+# merge the fixer identification list with "species.csv" to get "SPCD" for each species
+tree_spcd <- merge(ft, fixer, by.x="spcd", by.y="SPCD", all.x=TRUE, all.y=FALSE)
+tree_spcd[is.na(tree_spcd$FIX),]$FIX <- 0
+tree_spcd[tree_spcd$tpha==-999,]$tpha <- median(tree_spcd[tree_spcd$tpha!=-999,]$tpha)
+
+############ Step4: Get the plots with fixer present
+# load in plot data. (already loaded as p)
+ffp <- p[,c(2,3,5,6,7,8,9)] # pcn (plot number), meastime, lat, lon, elev, stdage(stand age), xmh
+gdata <- merge(ffp, tree_spcd, by.x="pcn", by.y="pcn", all.x=FALSE, all.y=TRUE) 
+
+gdata_fp_pcn <- unique(gdata[gdata$FIX==1,]$pcn) #unique plot number with fixer present
+gdata_fp <- data.frame(pcn=gdata_fp_pcn, fixer_present=1)
+rm(t) #free up some memory
+rm(gdata_fp_pcn)
+rm(p)
+rm(ft)
+gdata_fp1 <- merge(gdata_fp, gdata, by.x="pcn", by.y="pcn", all.x=TRUE, all.y=TRUE)
+gdata_fp2 <- gdata_fp1[!is.na(gdata_fp1$fixer_present),]
+
+gdata <- gdata_fp1 #why didn't we use gdata_fp2?
+
+gdata <- gdata[gdata$dbh>=0,] #only take positive dbh (will delete others) 1.96% trees
+gdata$BAm2 <- ((gdata$dbh/200)^2*3.14) #get basal area of individual trees
+
+rm(gdata_fp1)
+
+#recode NAs
+gdata[gdata$meastime<0,]$meastime <- NA
+gdata[gdata$elev<0,]$elev <- NA
+gdata[gdata$stdage<0,]$stdage <- NA
+
+############ Step5: Save the cleaned data
+#saveRDS(gdata, "output/gdata.RDS")
+```
+
+## Clean Time Series for Growth Rates:
+This takes the time series data from Jeremy Lichstein and cleans it in preparation for growth rates. The growth rates are also calculated. This was also adapted from code from Wenying Liao.
+
+```{r clean-gr, message=FALSE, warning=FALSE}
+######### Step1: Pre-processing.
+# load in tree data.
+t <- read.csv("data/tree_small.csv", header=TRUE)
+ft <- t[,c(1,2,4,5,7,9,10,11)] #pcn, tcn, spcd, dbh, cclcd, agb, tpha
+ft <- ft[ft$state!='PR'&ft$state!='VI'&ft$state!='HI', ]
+
+# load in tree time series data.
+ts <- read.csv("ACGCA_FIAv51_tree_ts.csv", header=TRUE) # Load in tree time series data
+ts1 <- merge(ts, ft, by.x="tcn1", by.y="tcn", all.x=TRUE, all.y=FALSE)
+colnames(ts1)[c(10,11,12,13,14,15,16)] <- c("state","pcn1","spcd1","dbh1","cclcd1","agb1","tpha1")
+
+ts2 <- merge(ts1, ft, by.x="tcn2", by.y="tcn", all.x=TRUE, all.y=FALSE)
+colnames(ts2)[c(17,18,19,20,21,22,23)] <- c("state2","pcn2","spcd2","dbh2","cclcd2","agb2","tpha2")
+
+ts3 <- merge(ts2, ft, by.x="tcn3", by.y="tcn", all.x=TRUE, all.y=FALSE)
+colnames(ts3)[c(24:30)] <- c("state3","pcn3","spcd3","dbh3","cclcd3","agb3","tpha3")
+
+rm(ts2) # removed large data files because they took up too much memory in R.
+
+ts4 <- merge(ts3, ft, by.x="tcn4", by.y="tcn", all.x=TRUE, all.y=FALSE)
+colnames(ts4)[c(31:37)] <- c("state4","pcn4","spcd4","dbh4","cclcd4","agb4","tpha4")
+
+rm(ts3)
+rm(ft)
+
+tbind <- ts4[!is.na(ts4$dbh1)|!is.na(ts4$dbh2)|!is.na(ts4$dbh3)|!is.na(ts4$dbh4),]
+
+tb12 <- tbind[,c(3,4,5,6,7,c(11:16),c(18:23))] #17 cols
+tb23 <- tbind[,c(2,3,5,7,8,c(18:23),c(25:30))]
+tb34 <- tbind[,c(1,2,5,8,9,c(25:30),c(32:37))]
+
+tb12[tb12$mt1<0,]$mt1 <- NA
+tb12[tb12$mt2<0,]$mt2 <- NA
+
+tb23[tb23$mt2<0,]$mt2 <- NA
+tb23[tb23$mt3<0,]$mt3 <- NA
+
+tb34[tb34$mt3<0,]$mt3 <- NA
+tb34[tb34$mt4<0,]$mt4 <- NA
+
+# get rid of NA's for dbh (diameter) and mt(measurement time)
+tb.12 <- tb12[!is.na(tb12$mt1)&!is.na(tb12$mt2)&!is.na(tb12$dbh1)&!is.na(tb12$dbh2),]
+tb.23 <- tb23[!is.na(tb23$mt2)&!is.na(tb23$mt3)&!is.na(tb23$dbh2)&!is.na(tb23$dbh3),]
+tb.34 <- tb34[!is.na(tb34$mt3)&!is.na(tb34$mt4)&!is.na(tb34$dbh3)&!is.na(tb34$dbh4),]
+
+colnames(tb.12) <- c("tcn2","tcn1","state","mt1","mt2","pcn1","spcd1",
+                     "dbh1","cclcd1","agb1","tpha1","pcn2","spcd2",
+                     "dbh2","cclcd2","agb2","tpha2")
+colnames(tb.23) <- c("tcn2","tcn1","state","mt1","mt2","pcn1","spcd1",
+                     "dbh1","cclcd1","agb1","tpha1","pcn2","spcd2",
+                     "dbh2","cclcd2","agb2","tpha2")
+colnames(tb.34) <- c("tcn2","tcn1","state","mt1","mt2","pcn1","spcd1",
+                     "dbh1","cclcd1","agb1","tpha1","pcn2","spcd2",
+                     "dbh2","cclcd2","agb2","tpha2")
+tb1234 <- rbind(tb.12,tb.23,tb.34) # Create a data frame that contains all re-measurements.
+
+######### Step2: Assign fixing status
+setwd("/Users/Anika/Documents/R/FIA_small")
+fixer <- read.csv("FIA_Fixer_spcd.csv", header=T) 
+#merge fixer ID list with "species.csv" to get "SPCD" for each species
+tree_spcd <- merge(tb1234, fixer, by.x="spcd1", by.y="SPCD", all.x=TRUE, all.y=FALSE)
+tree_spcd[is.na(tree_spcd$FIX),]$FIX <- 0
+
+############ Step3: Get the plots with fixer present
+
+# load in plot data.
+setwd("/Users/Anika/Documents/R/FIA_small")
+p <- read.csv("ACGCA_FIAv51_plot.csv",header=T)
+fp <- p[p$natforsamp==1 & p$propsamp==1 & p$ntlog==0,] 
+
+ffp <- fp[,c(2,8)] # pcn (plot number), std(stand age)
+gdata <- merge(ffp, tree_spcd, by.x="pcn", by.y="pcn1", all.x=FALSE, all.y=TRUE) 
+
+gdata_fp_pcn <- unique(gdata[gdata$FIX==1,]$pcn) #unique plot number with fixer present
+gdata_fp <- data.frame(pcn=gdata_fp_pcn, fixer_present=1)
+gdata_fp1 <- merge(gdata_fp, gdata, by.x="pcn", by.y="pcn", all.x=TRUE, all.y=TRUE)
+gdata_fp2 <- gdata_fp1[!is.na(gdata_fp1$fixer_present),]
+
+gdata <- gdata_fp2[gdata_fp2$dbh2>0 & gdata_fp2$dbh1>0,]
+
+######### Step4: Compute relative growth rates of individuals for each year
+t <- gdata
+t$lg <- log(t$dbh2)-log(t$dbh1)
+
+# Initialzize positivized relative growth rates
+t$lgp <- log(t$dbh2)-log(t$dbh1)
+
+#Compute "positivized" relative growth rates following approach in Condit et al. 2006 Science (Eqn.S5)
+MDL <- 0.05
+hMDL <- MDL/2
+t[t$lg<=0&!is.na(t$lg),]$lgp <- log(t[t$lg<=0&!is.na(t$lg),]$dbh1+hMDL)-log(t[t$lg<=0&!is.na(t$lg),]$dbh1)
+
+t$LGR <- t$lg/(t$mt2-t$mt1)
+t$LGRp <- t$lgp/(t$mt2-t$mt1)
+t$t <- t$mt2-t$mt1
+
+tree <- data.frame(pcn=t$pcn, tcn=t$tcn1, stdage=t$stdage, year=t$mt1, t=t$t, 
+                   spcd=t$spcd1, FIX=t$FIX, dbh=t$dbh1, LGR=t$LGR, LGRp=t$LGRp)
+
+#Get rid of the data above 99th percentile and below 1st percentile of growth rate.
+gdata <- tree[tree$LGR>quantile(tree$LGR,0.01) & tree$LGR<quantile(tree$LGR,0.99),]
+gdata_all <- gdata
+
+########### Step5: Write output
+setwd("/Users/Anika/Documents/R/FIA_small2")
+#saveRDS(gdata, "gdataGR_thin1.RDS")
+#saveRDS(t, "gdataGR1.RDS")
+# will be using t in future analysis which comes from gdataGR1.RDS
+```
+
+## Do Analysis (with bootstrapping) for method 1:
+This calculates BNF for trees and saplings and does the bootstrapping.
+
+```{r do-bootstrapping, message=FALSE, warning=FALSE}
+require(tidyr)
+require(dplyr)
+library(gridExtra)
+require(ggplot2)
+library(lattice)
+library(ggmap)
+library(maps)
+library(mapdata)
+require(RColorBrewer)
+library(mapproj)
+require(MASS)
+
+############ Step1: Load cleaned data
+setwd("/Users/Anika/Documents/R/FIA_small2")
+gdata <- readRDS("gdata.RDS")
+
+setwd("/Users/Anika/Documents/GradSchool/FIA_EstimateProj/output")
+sdata_pl <- readRDS("saplingdata.RDS")
+
+############ Step2: Bootstrapping fixation rates
+#load data
+acacia <- data.frame(BA=c(5.1,22.7,8.75,2.496),
+                     rate=c(50,112,5.25,60))
+alnus <- data.frame(BA=c(1.40,21.95,8.94,6.47,2.49,19.8,35.8),
+                    rate=c(17,150,57.29,86.44,61.49,164,320))
+prosopis <- data.frame(BA=c(0.101,0.33,0.17,0.40,0.75,0.82),
+                       rate=c(0.4,1.8,0.5,2,1.1,1.7))
+robinia <- data.frame(BA=c(8.2,32.1,52.1,27.75,26.41,16.98),
+                      rate=c(48,75,33,112.3,23.2,110))
+other <- rbind(acacia, alnus, prosopis, robinia)
+
+################## intercept method
+#regression, get mean and SE
+ac <- lm(rate ~ BA, data=acacia)
+ac.mu <- summary(ac)$coefficients[2,1]
+ac.se <- summary(ac)$coefficients[2,2]
+ac.int <- summary(ac)$coefficients[1,1]
+
+al <- lm(rate ~ BA, data=alnus)
+al.mu <- summary(al)$coefficients[2,1]
+al.se <- summary(al)$coefficients[2,2]
+al.int <- summary(al)$coefficients[1,1]
+
+pr <- lm(rate ~ BA, data=prosopis)
+pr.mu <- summary(pr)$coefficients[2,1]
+pr.se <- summary(pr)$coefficients[2,2]
+pr.int <- summary(pr)$coefficients[1,1]
+
+ro <- lm(rate ~ BA, data=robinia)
+ro.mu <- summary(ro)$coefficients[2,1]
+ro.se <- summary(ro)$coefficients[2,2]
+ro.int <- summary(ro)$coefficients[1,1]
+
+ro.mu <- mean(robinia$rate)
+ro.se <- sd(robinia$rate)/sqrt(nrow(robinia))
+
+other.mu <- mean(ac.mu, al.mu, pr.mu)
+other.se <- sqrt(pr.se^2+al.se^2+ac.se^2)
+other.int <- (ac.int + al.int + pr.int )/3
+
+ot <- lm(rate ~ BA, data=other)
+
+#regression checks on normality of residuals
+hist(summary(ac)$residuals)
+hist(summary(al)$residuals)
+hist(summary(pr)$residuals)
+hist(summary(ro)$residuals)
+
+#sample from distribution 10000 times
+n = 10000
+ac.samp <- mvrnorm(n,coef(ac)[1:2],vcov(ac))
+#ro.samp <- mvrnorm(n,coef(ro)[1:2],vcov(ro))
+pr.samp <- mvrnorm(n,coef(pr)[1:2],vcov(pr))
+al.samp <- mvrnorm(n,coef(al)[1:2],vcov(al))
+ot.samp <- mvrnorm(n,coef(ot)[1:2],vcov(ot))
+
+ro.samp <- rnorm(n,
+                 mean(robinia$rate),
+                 var(robinia$rate)^0.5) #gets random distribution of constant robinia rate
+
+#plot distribution
+plot(density(ac.samp),
+     main=expression(italic(Acacia)),
+     xlab=expression('fixation rate (kg N ha'^-1*' yr'^-1*') per stand basal area'))
+plot(density(al.samp),
+     main=expression(italic(Alnus)),
+     xlab=expression('fixation rate (kg N ha'^-1*' yr'^-1*') per stand basal area'))
+plot(density(pr.samp),
+     main=expression(italic(Prosopis)),
+     xlab=expression('fixation rate (kg N ha'^-1*' yr'^-1*') per stand basal area'))
+plot(density(ro.samp),
+     main=expression(italic(Robinia)),
+     xlab=expression('fixation rate (kg N ha'^-1*' yr'^-1*') per stand basal area'))
+plot(density(other.samp),
+     main=expression(italic(Others)),
+     xlab=expression('fixation rate (kg N ha'^-1*' yr'^-1*') per stand basal area'))
+
+table(gdata$Genus)
+
+nfixers <- gdata %>% 
+  filter(FIX==1) %>% 
+  summarise(n())
+
+gdata %>% 
+  filter(FIX == 1) %>% 
+  group_by(Genus) %>% 
+  summarise(cnt=n()) %>% 
+  mutate(cnt/nfixers[[1]]*100)
+
+############ Step3: Calculate %BA fixing
+#don't think we need to use this....
+plot_ba <- gdata %>%
+  group_by(pcn, spcd) %>%
+  summarize(ba.tpha=sum(BAm2*tpha, na.rm=TRUE),fix=mean(FIX, na.rm=TRUE))
+
+#-------------------------------- using mvrnorm -------------------------------------
+#combine trees and saplings to get all stems
+treef0 <- gdata %>%
+  group_by(pcn, Genus) %>%
+  summarise(plotBAr=sum(BAm2*tpha), 
+            lat=first(lat), 
+            lon=first(lon), 
+            state=first(state), 
+            FIX=first(FIX), 
+            ACT1vsRIZ0=first(ACT1vsRIZ0)) 
+
+setwd("/Users/Anika/Documents/GradSchool/FIA_EstimateProj/output")
+sdata_pl <- readRDS("saplingdata.RDS")
+
+sapf0 <- sdata_pl %>%
+  group_by(pcn, Genus) %>%
+  summarise(plotBAs=sum(BAm2ha))
+
+fixers0 <- merge(treef0, sapf0, by=c("pcn","Genus"), all=T)
+fixers0[is.na(fixers0$plotBAs),]$plotBAs <- 0
+fixers0[is.na(fixers0$plotBAr),]$plotBAr <- 0
+fixers0$pBA <- fixers0$plotBAs+fixers0$plotBAr
+
+#while loop to get CI around estimate
+totalt <- vector()
+i <- 1
+while(i<100){
+  plot_sens <- fixers0 %>% 
+    group_by(pcn, Genus) %>%
+    mutate(fix.r = 
+             ifelse(Genus %in% c("Acacia"), 
+                          sum(ac.samp[sample(1:n, 1, replace=T),]*c(1,pBA)), 
+                          ifelse(Genus %in% c("Albizia"), 
+                                 sum(ot.samp[sample(1:n, 1, replace=T),]*c(1,pBA)),
+                                 ifelse(Genus %in% c("Alnus"), 
+                                        sum(al.samp[sample(1:n, 1, replace=T),]*c(1,pBA)),
+                                        ifelse(Genus %in% c("Cercocarpus"), 
+                                               sum(pr.samp[sample(1:n, 1, replace=T),]*c(1,pBA)),
+                                               ifelse(Genus %in% c("Prosopis"), 
+                                                      sum(pr.samp[sample(1:n, 1, replace=T),]*c(1,pBA)), 
+                                                      ifelse(Genus %in% c("Ebenopsis"), 
+                                                             sum(ot.samp[sample(1:n, 1, replace=T),]*c(1,pBA)),
+                                                             ifelse(Genus %in% c("Robinia"),
+                                                                    rnorm(1,mean(robinia$rate),var(robinia$rate)^0.5),
+                                                                    ifelse(Genus %in% c("Olneya"), 
+                                                                           sum(ot.samp[sample(1:n, 1, replace=T),]*c(1,pBA)),
+                                                                           ifelse(Genus %in% c("Elaeagnus"),                                                           sum(ot.samp[sample(1:n, 1, replace=T),]*c(1,pBA)),
+                                                                                  0)))))))))) 
+  
+  setwd("/Users/Anika/Documents/GradSchool/FIA_EstimateProj/output")
+  #saveRDS(plot_sens, "treesapfix.RDS")
+  
+  numplots <- length(unique(fixers0$pcn))
+  test <- plot_sens %>%
+    group_by(pcn) %>%
+    summarize(pfix=sum(fix.r,na.rm=T))
+  
+  totalt[i] <- mean(test$pfix)*2428.114*numplots
+  i<-i+1
+  print(i)
+}
+
+t.test(totalt)
+
+totalt
+sum(test$pfix)*2428.114
+
+mean(test$pfix) #mean F rate in plots with fixers
+sum(test$pfix)/length(unique(fixers0$pcn)) #mean F rate in all plots
+
+mtg <- plot_sens %>%
+  group_by(Genus) %>%
+  summarize(BAmean=mean(plotBA,na.rm=T),BAmin=min(plotBA,na.rm=T),
+            BAmax=max(plotBA,na.rm=T),BAmed=median(plotBA),
+            BAmode=mode(plotBA))
+
+#####asymbiotic/under, take rate for 1 ha, then multiply by number of plots area plot represents
+asy <- 1.40*2428.114*numplots
+asy
+under <- 7.32*2428.114*numplots
+under
+# should we scale 1.40 kgN/ha to the size of the plot (0.404 ha)???
+
+#------------------------------------ combine trees and saplings -----------------------------------
+#combine trees and saplings from non mvrnorm calculation
+#combine trees and saplings to get only fixers
+treef <- plot_fix_bs
+treef <- treef[treef$fix.r != 0, ]
+treef1 <- treef %>%
+  group_by(pcn) %>%
+  summarise(fixr=sum(fix.r), plotBAr=sum(plotBA))
+
+sapf <- plot_fixs
+sapf <- sapf[sapf$fix.s != 0, ]
+sapf1 <- sapf %>%
+  group_by(pcn) %>%
+  summarise(fixs=sum(fix.s), plotBAs=sum(plotBA))
+
+fixers <- merge(treef1, sapf1, by="pcn", all=T)
+fixers[is.na(fixers$fixs),]$fixs <- 0
+fixers[is.na(fixers$fixr),]$fixr <- 0
+fixers[is.na(fixers$plotBAs),]$plotBAs <- 0
+fixers[is.na(fixers$plotBAr),]$plotBAr <- 0
+fixers$fix <- fixers$fixr+fixers$fixs
+fixers$plotBAt <- fixers$plotBAs+fixers$plotBAr
+
+
+setwd("/Users/Anika/Documents/GradSchool/FIA_EstimateProj/output")
+saveRDS(fixers, "treefix.RDS")
+
+#TOTAL N FIXED
+sum(fixers$fix)*2428.114
+
+#combine trees and saplings to get all stems
+treef2 <- plot_fix_bs %>%
+  group_by(pcn) %>%
+  summarise(fixr=sum(fix.r), plotBAr=sum(plotBA))
+
+sapf2 <- plot_fixs %>%
+  group_by(pcn) %>%
+  summarise(fixs=sum(fix.s), plotBAs=sum(plotBA))
+
+fixers2 <- merge(treef2, sapf2, by="pcn", all=T)
+fixers2[is.na(fixers2$fixs),]$fixs <- 0
+fixers2[is.na(fixers2$fixr),]$fixr <- 0
+fixers2[is.na(fixers2$plotBAs),]$plotBAs <- 0
+fixers2[is.na(fixers2$plotBAr),]$plotBAr <- 0
+fixers2$fix <- fixers2$fixr+fixers2$fixs
+fixers2$plotBAt <- fixers2$plotBAs+fixers2$plotBAr
+
+sum(fixers2$fix)/length(unique(fixers2$pcn)) #mean fix rate for all trees+seedlings
+sum(fixers2$fix)*2428.114 #total N fixed for all trees+seedlings
+
+```
+
+## Effect of P. contorta
+Does this possibly N-fixing root thing make a difference?
+
+```{r p-contorta, message=FALSE, warning=FALSE}
+#-----------------------------------P contorta----------------------------------------
+
+################
+#
+# P. contorta
+# endophytic N fixer? (see Paul papers)
+# Is it important?
+#
+###############
+
+pcontorta <- gdata %>% filter(spcd==1082|spcd==1081|spcd==108)
+nrow(pcontorta) #192154
+
+# At Alnus Rate
+pcon_fix <- pcontorta %>% 
+  group_by(pcn) %>%
+  summarize(plotBA=sum(BAm2*tpha,na.rm=T), cnt=n()) %>%
+  mutate(fix = sum(al.samp[sample(1:n, 1, replace=T),]*c(1,plotBA)))
+
+sum(pcon_fix$fix) #1266878 kgN (if fixing at same rate as Alnus)
+
+(2932361869+sum(pcon_fix$fix))/2932361869 #percent change in value for fixed N
+
+# 14 % change in the amount of N fixed
+# Assumes that P. contorta fixes at same rate as Alnus
+# probably too high so let's check with a lower rate
+
+# At 10% Alnus rate
+ch <- vector()
+i <- 1
+while(i<100){
+  pcon_fix <- pcontorta %>% 
+    group_by(pcn) %>%
+    summarize(plotBA=sum(BAm2*tpha,na.rm=T), cnt=n()) %>%
+    mutate(fix = sum(al.samp[sample(1:n, 1, replace=T),]*0.1*c(1,plotBA)))
+  
+  sum(pcon_fix$fix) #1346508398 kgN (if fixing at same rate as Alnus)
+  
+  ch[i] <- (2932361869+sum(pcon_fix$fix))/2932361869 #percent change in value for fixed N
+  i <- i+1
+}
+t.test(ch)
+
+# 1.4 % change in the amount of N fixed
+# Assumes that P. contorta fixes at 10% Alnus 
+# This is what the Paul paper suggests
+
+# At 1% Alnus rate
+ch <- vector()
+i <- 1
+while(i<100){
+  pcon_fix <- pcontorta %>% 
+    group_by(pcn) %>%
+    summarize(plotBA=sum(BAm2*tpha,na.rm=T), cnt=n()) %>%
+    mutate(fix = sum(al.samp[sample(1:n, 1, replace=T),]*0.01*c(1,plotBA)))
+  
+  sum(pcon_fix$fix) #114322.4 kgN (if fixing at same rate as Alnus)
+  
+  ch[i] <- (2932361869+sum(pcon_fix$fix))/2932361869 #percent change in value for fixed N
+  i <- i+1
+}
+t.test(ch)
+
+# 1.044 % change +/- 0.008 in the amount of N fixed
+# Assumes that P. contorta fixes at 10% Alnus 
+# This is what the Paul paper suggests
+
+# At 0.5% Alnus rate
+# while loop to bootstrap percent change for CI
+ch <- vector()
+i <- 1
+while(i<100){
+  pcon_fix <- pcontorta %>% 
+    group_by(pcn) %>%
+    summarize(plotBA=sum(BAm2*tpha,na.rm=T), cnt=n()) %>%
+    mutate(fix = sum(al.samp[sample(1:n, 1, replace=T),]*0.005*c(1,plotBA)))
+  
+  sum(pcon_fix$fix) #63321393 kgN (if fixing at same rate as Alnus)
+  
+  ch[i] <- (2932361869+sum(pcon_fix$fix))/2932361869 #percent change in value for fixed N
+  i <- i+1
+}
+t.test(ch)
+
+# 1.028 % +/- 0.003 change in the amount of N fixed
+# Assumes that P. contorta fixes at 0.5% Alnus 
+```
+### Results:
+Overall if P. contorta fixes at 10% A. rubra (max rates observed by Paul and Chapman), then there is a 1.4% increase in fixed N. If it fixes at 1% A. rubra there is a 1.044% change. If it fixes a 0.5% A. rubra there is a 1.028% change.
+
+## Sensitivity analysis:
+Sensitivity analysis of bootstrapping
+
+```{r sensitivity, message=FALSE, warning=FALSE}
+# function to carry out analysis
+getrates1 <- function(typeac, ac.samp, typeal, al.samp, typepr, pr.samp, typero, ro.samp, typeo, other.samp) {
+  if(typeac=="min"){
+    ac.s <- quantile(ac.samp[,2],.025)[[1]]
+    ac.i<- quantile(ac.samp[,1],.025)[[1]]
+  }else if(typeac=="max"){
+    ac.s <- quantile(ac.samp[,2],.975)[[1]]
+    ac.i <- quantile(ac.samp[,1],.975)[[1]]
+  }else if(typeac=="mean"){
+    ac.s <- quantile(ac.samp[,2],.5)[[1]]
+    ac.i<- quantile(ac.samp[,1],.5)[[1]]
+  }else{
+    print("ac error")
+  }
+  
+  if(typeal=="min"){
+    al.s <- quantile(al.samp[,2],.025)[[1]]
+    al.i <- quantile(al.samp[,1],.025)[[1]]
+  }else if(typeal=="max"){
+    al.s <- quantile(al.samp[,2],.975)[[1]]
+    al.i <- quantile(al.samp[,1],.975)[[1]]
+  }else if(typeal=="mean"){
+    al.s <- quantile(al.samp[,2],.5)[[1]]
+    al.i<- quantile(al.samp[,1],.5)[[1]]
+  }else{
+    print("al error")
+  }
+  
+  if(typepr=="min"){
+    pr.s <- quantile(pr.samp[,2],.025)[[1]]
+    pr.i <- quantile(pr.samp[,1],.025)[[1]]
+  }else if(typepr=="max"){
+    pr.s <- quantile(pr.samp[,2],.975)[[1]]
+    pr.i <- quantile(pr.samp[,1],.975)[[1]]
+  }else if(typepr=="mean"){
+    pr.s <- quantile(pr.samp[,2],.5)[[1]]
+    pr.i<- quantile(pr.samp[,1],.5)[[1]]
+  }else{
+    print("pr error")
+  }
+  
+  if(typero=="min"){
+    ro <- quantile(ro.samp,.025)[[1]]
+    #ro <- mean(robinia$rate)
+  }else if(typero=="max"){
+    ro <- quantile(ro.samp,.975)[[1]]
+    #ro <- mean(robinia$rate)
+  }else if(typero=="mean"){
+    ro <- quantile(ro.samp,.5)[[1]]
+  }else{
+    print("ro error")
+  }
+  
+  if(typeo=="min"){
+    ot.s <- quantile(ot.samp[,2],.025)[[1]]
+    ot.i <- quantile(ot.samp[,1],.025)[[1]]
+  }else if(typeo=="max"){
+    ot.s <- quantile(ot.samp[,2],.975)[[1]]
+    ot.i <- quantile(ot.samp[,1],.975)[[1]]
+  }else if(typeo=="mean"){
+    ot.s <- quantile(ot.samp[,2],.5)[[1]]
+    ot.i <- quantile(ot.samp[,1],.5)[[1]]
+  }else{
+    print("other error")
+  }
+  
+  result <- list(ac.s=ac.s, ac.i=ac.i, al.s=al.s, al.i=al.i, pr.s=pr.s, pr.i=pr.i, 
+                 ro=ro, ot.s=ot.s, ot.i=ot.i)
+  return(result)
+}
+
+# for sensitivity analysis need saplings + trees
+plotfix <- function(gdata, r) {
+  #tree data
+  plot_fixb <- gdata %>% 
+    group_by(pcn, Genus) %>%
+    mutate(fix.r = ifelse(Genus %in% c("Acacia"), r$ac.s*plotBA+r$ac.i, 
+                          ifelse(Genus %in% c("Albizia"), r$ot.s*plotBA+r$ot.i,
+                                 ifelse(Genus %in% c("Alnus"), r$al.s*plotBA+r$al.i,
+                                        ifelse(Genus %in% c("Cercocarpus"), r$pr.s*plotBA+r$pr.i,
+                                               ifelse(Genus %in% c("Prosopis"), r$pr.s*plotBA+r$pr.i, 
+                                                      ifelse(Genus %in% c("Ebenopsis"), r$ot.s*plotBA+r$ot.i,
+                                                             ifelse(Genus %in% c("Robinia"),r$ro,
+                                                                    ifelse(Genus %in% c("Olneya"), r$ot.s*plotBA+r$ot.i,
+                                                                           ifelse(Genus %in% c("Elaeagnus"), r$ot.s*plotBA+r$ot.i,
+                                                                                  0))))))))))
+  
+  numplots <- length(unique(fixers0$pcn))
+  test <- plot_fixb %>%
+    group_by(pcn) %>%
+    summarize(pfix=sum(fix.r,na.rm=T))
+  
+  total <- mean(test$pfix)*2428.114*numplots
+  total
+  
+  standard <- 2929182982
+ 
+  change <- ((total-standard)/standard)*100 #percent change from standard run to this run
+  return(list(tree=plot_fixb, tot=total, stand=standard, ch=change))
+}
+
+#standard <- totalt + totals #3322699942
+standard <- 2929182982
+
+#up/down gives actual value
+#*.p gives percent change
+# use adata when using (saplings+trees) or gdata for just trees
+temp <- plotfix(fixers0, 
+                getrates1("max", ac.samp, "mean", al.samp, "mean", pr.samp, "mean", ro.samp, "mean", ot.samp))
+acup <- temp[[2]]
+acu.p <- temp[[4]]
+
+temp <- plotfix(fixers0, 
+                getrates1("min", ac.samp, "mean", al.samp, "mean", pr.samp, "mean", ro.samp, "mean", ot.samp))
+acdown <- temp[[2]]
+acd.p <- temp[[4]]
+
+temp <- plotfix(fixers0,
+         getrates1("mean", ac.samp, "max", al.samp, "mean", pr.samp, "mean", ro.samp, "mean", ot.samp))
+alup <- temp[[2]]
+alu.p <- temp[[4]]
+
+temp <- plotfix(fixers0,
+                getrates1("mean", ac.samp, "min", al.samp, "mean", pr.samp, "mean", ro.samp, "mean", ot.samp))
+aldown <- temp[[2]]
+ald.p <- temp[[4]]
+
+temp <- plotfix(fixers0,
+                getrates1("mean", ac.samp, "mean", al.samp, "max", pr.samp, "mean", ro.samp, "mean", ot.samp))
+prup <- temp[[2]]
+pru.p <- temp[[4]]
+
+temp <- plotfix(fixers0,
+                getrates1("mean", ac.samp, "mean", al.samp, "min", pr.samp, "mean", ro.samp, "mean", ot.samp))
+prdown <- temp[[2]]
+prd.p <- temp[[4]]
+
+temp <- plotfix(fixers0,
+                getrates1("mean", ac.samp, "mean", al.samp, "mean", pr.samp, "max", ro.samp, "mean", ot.samp))
+roup <- temp[[2]]
+rou.p <- temp[[4]]
+
+temp <- plotfix(fixers0,
+                getrates1("mean", ac.samp, "mean", al.samp, "mean", pr.samp, "min", ro.samp, "mean", ot.samp))
+rodown <- temp[[2]]
+rod.p <- temp[[4]]
+
+temp <- plotfix(fixers0,
+                getrates1("mean", ac.samp, "mean", al.samp, "mean", pr.samp, "mean", ro.samp, "max", ot.samp))
+otherup <- temp[[2]]
+otheru.p <- temp[[4]]
+
+temp <- plotfix(fixers0,
+                getrates1("mean", ac.samp, "mean", al.samp, "mean", pr.samp, "mean", ro.samp, "min", ot.samp))
+otherdown <- temp[[2]]
+otherd.p <- temp[[4]]
+
+temp <- plotfix(fixers0,
+                getrates1("max", ac.samp, "max", al.samp, "max", pr.samp, "max", ro.samp, "max", ot.samp))
+allup <- temp[[2]]
+allu.p <- temp[[4]]
+
+temp <- plotfix(fixers0,
+                getrates1("min", ac.samp, "min", al.samp, "min", pr.samp, "min", ro.samp, "min", ot.samp))
+alldown <- temp[[2]]
+alld.p <- temp[[4]]
+
+pctch <- c(acu.p, acd.p, alu.p, ald.p, pru.p, prd.p, rou.p, 
+           rod.p, otheru.p, otherd.p, allu.p, alld.p)
+par(mar=c(9.5,5.5,4,2)) #(bottom, left, top, right), default=5,4,4,2
+senbar <- barplot(pctch, ylim=c(-120,120), 
+                  ylab=expression(paste("% ", Delta, " Total N fixed by trees")),
+                  main="Sensitivity Analysis for N Fixation Rates",
+                  names.arg=c(expression(italic(Acacia)~UCI), 
+                              expression(italic(Acacia)~LCI),
+                              expression(italic(Alnus)~UCI),
+                              expression(italic(Alnus)~LCI),
+                              expression(italic(Prosopis)~UCI),
+                              expression(italic(Prosopis)~LCI),
+                              expression(italic(Robinia)~UCI),
+                              expression(italic(Robinia)~LCI),
+                              "Other, UCI","Other, LCI","All, UCI","All, LCI"),
+                  axes=TRUE, axis.lty=1, cex.lab=1.5, 
+                  cex.axis=1.5, cex.main=1.5, cex.sub=1.5, las=2)
+#expression('fixation rate (kg N ha'^-1*' yr'^-1*') per stand basal area'))
+#expression( italic(p~value) == 0.01 ))
+pctch1 <- round(pctch, 2)
+pctch1 <- pctch1 + c(5, -5, 5, -5, 5, -5, 5, -5, 5, -5, 5, -5)
+text(senbar, pctch1, round(pctch,digits=2), cex=1) 
+```
+
+## Plotting Result so far:
+Making plots of some stuff.
+
+```{r plotting, message=FALSE, warning=FALSE}
+#-----------------------------------plotting----------------------------------------
+totalfix <- sum(plot_sens$fix.r)*2428.114
+genus3 <- plot_sens %>%
+  group_by(Genus) %>%
+  summarise(fixt=sum(fix.r)*2428.114) %>%
+  mutate(pfix=fixt/totalfix*100)
+genus3 #This gives the amount of N fixed by genus
+
+#histogram of fixation rates
+plot_fix <- plot_fix_bs
+plot_fix <- plot_fix %>% mutate(fix=fix.s+fix.r)
+plot_fix <- plot_fix %>% group_by(pcn) %>% summarise(pfix=sum(fix,na.rm=T)) %>% mutate(pfix.scaled=pfix*2428.114)
+hist(plot_fix$fix.r, prob=TRUE, breaks=30, xlab="Fixation Rate (kgN/ha/yr)",
+     main="Histogram of Fixation Rates")
+
+
+#number of stems of each genus
+nrow(plot_ba[plot_ba$genus=="acacia",]) #repeat for each genus
+
+#percent BA in each genus
+genus_data <- plot_sens %>%
+  group_by(Genus) %>%
+  summarise(bastand.mean = mean(plotBA, na.rm=TRUE), 
+            bastand.sd = sd(plotBA, na.rm=TRUE), 
+            bastand.tot=sum(plotBA,na.rm=TRUE),
+            bastand.max=max(plotBA, na.rm=TRUE))
+
+totalba <- sum(plot_fix$BAm2*plot_fix$tpha,na.rm=T)
+
+
+genus <- plot_sens %>%
+  group_by(Genus) %>%
+  summarise(pfix = sum(fix.r, na.rm=TRUE), 
+            pfix.mean = mean(fix.r, na.rm=TRUE)) %>%
+  mutate(pfix.scaled = pfix*2428.114, 
+         pct = pfix/sum(pfix)*100)
+
+genus <- genus[c(1:3,5:8,10:11),]
+
+#write outputs from do.R
+setwd("/Users/Anika/Documents/GradSchool/FIA_EstimateProj/output")
+#saveRDS(plot_fix, "gfdata_fix.RDS") #gfdata with fixation rates
+#saveRDS(plots, "fix_by_plot.RDS")
+#saveRDS(states, "fix_by_state.RDS")
+#saveRDS(genus, "fix_by_genus.RDS")
+#saveRDS(species, "fix_by_species.RDS")
+
+sum(plot_fix$fix.r)*2428.114 # each plot represents: 6000 acres = 2428.114 ha
+
+#average fixed nitrogen rate
+mean(plot_fix$fix.r,na.rm=TRUE)
+sd(plot_fix$fix.r,na.rm=TRUE)
+
+#----------------------------------- reasonable? -----------------------------------
+plot_fix_bs <- droplevels(plot_fix_bs)
+boxplot(plotBA ~ Genus, data=plot_fix_bs, ylab="Plot level BA (m2/ha)")
+boxplot(fix.r ~ Genus, data=plot_fix_bs, ylab="Plot level fixed N (kgN/ha/yr)")
+
+
+#------------------------------------- load %ndfa  -----------------------------------
+require(ggplot2)
+require(gridExtra)
+
+# get %ndfa data
+setwd("/Users/Anika/Documents/GradSchool/FIA_EstimateProj/data")
+wood <- readRDS("GR_ndfa.RDS")
+
+totalfix <- sum(wood$total,na.rm=T)
+genusn <- wood %>% 
+  group_by(Genus) %>% 
+  summarize(fix=sum(total, na.rm=T)) %>%
+  mutate(pfix=fix/totalfix*100)
+ac <- c("Acacia", 0, 0)
+eb <- c("Ebenopsis", 0, 0)
+ol <- c("Olneya", 0, 0)
+genusn <- rbind(genusn, ac, eb, ol)
+genusn <- genusn[c(1:2,4:7,9:11),]
+genusn$pfix <- as.numeric(genusn$pfix)
+genusn
+
+#------------------------------------------------------------------------------------
+#FIGURE 3
+#percent fixed by genus (change geom_text, vjust=1.5 and color=white to get numbers inside bars)
+plot3 <- ggplot(genus, aes(x=Genus, y=pct)) +
+  # draw the bar plot
+  geom_bar(stat="identity") +
+  # create the white text above the bar in white
+  geom_text(aes(label=round(pct, digits=1)), vjust=1.5, colour="white") +
+  geom_hline(yintercept = 0, cex=0.9) +
+  #geom_vline(xintercept=which(genus$genus == 0)) + 
+  geom_vline(xintercept=0.4) +
+  labs(subtitle="Accretion method", x="Genus", y="Percent of N Fixed") +
+  ylim(0,95) +
+  #ggtitle("Percent Tree BNF per Genus") +
+  theme(panel.background = element_rect(fill = 'white', colour = 'white'),
+        text = element_text(size=20), 
+        axis.text.x = element_text(angle=90, hjust=1)) +
+  theme(plot.subtitle = element_text(family = "Trebuchet MS", 
+                                     color="#666666", 
+                                     face="bold", 
+                                     size=32, 
+                                     hjust=0.5)) +
+  theme(axis.title = element_text(family = "Trebuchet MS", 
+                                  color="#666666", 
+                                  size=22)) +
+  theme(axis.text.x = element_text(face="italic"))
+
+plot4 <- ggplot(genusl, aes(x=Genus, y=pct)) +
+  # draw the bar plot
+  geom_bar(stat="identity") +
+  # create the white text above the bar in white
+  geom_text(aes(label=round(pct, digits=1)), vjust=1.5, colour="white") +
+  geom_hline(yintercept = 0, cex=0.9) +
+  #geom_vline(xintercept=which(genus$genus == 0)) + 
+  geom_vline(xintercept=0.4) +
+  labs(subtitle="Light Limitation", x="Genus", y="") +
+  #xlab("Genus") +
+  #ylab("Percent of N Fixed") +
+  ylim(0,95) +
+  #ggtitle("Percent Tree BNF per Genus (light limitation)") +
+  theme(panel.background = element_rect(fill = 'white', colour = 'white'),
+        text = element_text(size=20), axis.text.x = element_text(angle=90, hjust=1)) +
+  theme(plot.subtitle = element_text(family = "Trebuchet MS", color="#666666", face="bold", size=32, hjust=0.5)) +
+  theme(axis.title = element_text(family = "Trebuchet MS", color="#666666", face="bold", size=22)) +
+  theme(axis.text.x = element_text(face="italic"))
+
+#import %ndfa results
+#percent fixed by genus (change geom_text, vjust=1.5 and color=white to get numbers inside bars)
+plot1 <- ggplot(genusn, aes(x=Genus, y=pfix)) +
+  # draw the bar plot
+  geom_bar(stat="identity") +
+  # create the white text above the bar in white
+  geom_text(aes(label=round(pfix,digits=1)), vjust=1.5, colour="white") +
+  geom_hline(yintercept = 0, cex=0.9) +
+  #geom_vline(xintercept=which(genus$genus == 0)) + 
+  geom_vline(xintercept=0.4) +
+  labs(subtitle="%Ndfa Method", x="Genus", y="") +
+  ylim(0,95) +
+  theme(panel.background = 
+          element_rect(fill = 'white', 
+                       colour = 'white'),
+        text = element_text(size=20), 
+        axis.text.x = element_text(angle=90, hjust=1)) +
+  theme(plot.subtitle = 
+          element_text(family = "Trebuchet MS", 
+                       color="#666666", 
+                       face="bold", 
+                       size=32, 
+                       hjust=0.5)) +
+  theme(axis.title = 
+          element_text(family = "Trebuchet MS", 
+                       color="#666666", 
+                       face="bold", 
+                       size=22))+
+  theme(axis.text.x = element_text(face="italic"))
+
+grid.arrange(plot3, plot4, plot1, ncol=3, nrow = 1)
+
+#------------------------------ N fixer presence map ----------------------------
+
+usa <- map_data("usa")
+world <- map_data("world", xlim=c(-140,-65), ylim=c(23,63))
+
+#map by genera with white background (FIGURE 1)
+ggplot() + 
+  geom_polygon(data = usa, aes(x=long, y = lat, group = group), alpha = 0.01, colour='black', fill=NA) + 
+  coord_fixed(1.3) +
+  geom_point(aes(x=gfdata$lon, y=gfdata$lat, color=as.factor(gfdata$Genus))) +
+  # scale_color_gradientn(colours = rainbow(6)) + 
+  labs(x=" ", y=" ", title="Nitrogen Fixing Trees in FIA") +
+  labs(color='Genus') +
+  theme(panel.background = element_rect(fill = 'white', colour = 'white'),
+        plot.title = element_text(hjust = 0.5),
+        text = element_text(size=20),
+        legend.text = element_text(face = "italic")) +
+  guides(colour = guide_legend(override.aes = list(size=10))) 
+  #coord_map(projection = "albers", par=c(lat0=30, lat1=40))
+
+#tried to get albers projection, not working with data
+ggplot() + 
+  geom_polygon(data = usa, aes(x=long, y = lat, group = group), alpha = 0.01, colour='black', fill=NA) + 
+  coord_fixed(1.3) +
+  geom_point(aes(x=gfdata$lon, y=gfdata$lat, color=as.factor(gfdata$Genus))) +
+  coord_map("albers", lat0=30, lat1=40)
+  coord_map(projection = "albers", par=c(lat0=30, lat1=40))
+
+#---------------------------- N regions plot ------------------------------------
+setwd("/Users/Anika/Documents/R/FIA_small")
+regions <- read.csv("FIA_regions.csv", header=TRUE)
+plotinfo <- merge(p, regions, by.x="state", by.y="State.Abb", all.x=T)
+
+stdinfo <- merge(fixers, plotinfo, by="pcn",all.x=T, all.y=F)
+totalfix <- sum(stdinfo$fix)
+
+regions <- stdinfo %>%
+  group_by(FIA.Region) %>%
+  summarise(fix.region=sum(fix, na.rm=TRUE)) %>%
+  mutate(fixpct=fix.region/totalfix*100)
+
+#percent fixed by region with white background (change geom_text, vjust=1.5 and color=white to get numbers inside bars)
+ggplot(regions, aes(x=FIA.Region, y=fixpct)) +
+  # draw the bar plot
+  geom_bar(stat="identity") +
+  # create the weight text above the bar in white
+  geom_text(aes(label=round(fixpct,digits=1)), vjust=-.3, colour="grey22") +
+  geom_hline(yintercept = 0, cex=0.9) +
+  xlab("FIA Region") +
+  ylab("Percent N Fixed by Region") +
+  ggtitle("Percent N Fixed by FIA Region") +
+  theme(panel.background = element_rect(fill = 'white', colour = 'white'),
+        plot.title = element_text(hjust = 0.5),
+        text = element_text(size=20))
+```
+
+## Light downregulation
+What if trees not in the canopy cannot fix N?
+
+```{r light-downreg, message=FALSE, warning=FALSE}
+# --------------------------- Light downregulation ---------------------------------
+#combine trees and saplings to get all stems
+treef0l <- filter(gdata, cclcd<4) %>%
+  group_by(pcn, Genus) %>%
+  summarise(plotBAr=sum(BAm2*tpha))
+
+sapf0 <- sdata_pl %>%
+  group_by(pcn, Genus) %>%
+  summarise(plotBAs=sum(BAm2ha))
+
+fixers0l <- merge(treef0l, sapf0, by=c("pcn","Genus"), all=T)
+fixers0l[is.na(fixers0l$plotBAs),]$plotBAs <- 0
+fixers0l[is.na(fixers0l$plotBAr),]$plotBAr <- 0
+fixers0l$plotBA <- fixers0l$plotBAs+fixers0l$plotBAr
+
+plot_sen_l <- fixers0l %>% 
+  group_by(pcn, Genus) %>%
+  mutate(fix.r = 
+           ifelse(Genus %in% c("Acacia"), 
+                  sum(ac.samp[sample(1:n, 1, replace=T),]*c(1,plotBA)), 
+                        ifelse(Genus %in% c("Albizia"), 
+                               sum(ot.samp[sample(1:n, 1, replace=T),]*c(1,plotBA)),
+                               ifelse(Genus %in% c("Alnus"), 
+                                      sum(al.samp[sample(1:n, 1, replace=T),]*c(1,plotBA)),
+                                      ifelse(Genus %in% c("Cercocarpus"), sum(pr.samp[sample(1:n, 1, replace=T),]*c(1,plotBA)),
+                                             ifelse(Genus %in% c("Prosopis"), sum(pr.samp[sample(1:n, 1, replace=T),]*c(1,plotBA)), 
+                                                    ifelse(Genus %in% c("Ebenopsis"), sum(ot.samp[sample(1:n, 1, replace=T),]*c(1,plotBA)),
+                                                           ifelse(Genus %in% c("Robinia"),rnorm(1,mean(robinia$rate),var(robinia$rate)^0.5),
+                                                                  ifelse(Genus %in% c("Olneya"), sum(ot.samp[sample(1:n, 1, replace=T),]*c(1,plotBA)),
+                                                                         ifelse(Genus %in% c("Elaeagnus"), sum(ot.samp[sample(1:n, 1, replace=T),]*c(1,plotBA)),
+                                                                                0))))))))))
+
+numplots <- length(unique(fixers0l$pcn))
+test <- plot_sen_l %>%
+  group_by(pcn) %>%
+  summarize(pfix=sum(fix.r,na.rm=T))
+
+totalt <- mean(test$pfix)*2428.114*numplots
+totalt
+sum(test$pfix)*2428.114
+
+mean(test$pfix) #mean F rate in plots with fixers
+sum(test$pfix)/length(unique(fixers0l$pcn)) #mean F rate in all plots
+
+# not fixed
+setwd("/Users/Anika/Documents/GradSchool/FIA_EstimateProj/output")
+#saveRDS(plot_sen_l, "gfldata_fix.RDS") #gfdata with fixation rates
+
+genusl <- plot_sen_l %>%
+  group_by(Genus) %>%
+  summarise(pfix = sum(fix.r, na.rm=TRUE), pfix.mean = mean(fix.r, na.rm=TRUE)) %>%
+  mutate(pfix.scaled = pfix*2428.114, pct=(pfix/sum(pfix))*100)
+
+genusl <- genusl[c(1:3,5:8,10,11),]
+
+#number of stems of each
+plot_fix_l %>% group_by(Genus) %>% summarise(cnt=n())
+
+```
+
+## Do Analysis (with bootstrapping) for method 2:
+Using growth rate and %Ndfa we also do the fixation calculation and bootstrapping.
+
+```{r do-gr, message=FALSE, warning=FALSE}
+require(tidyr)
+require(dplyr)
+
+############ Step1: Load cleaned data
+setwd("/Users/Anika/Documents/R/FIA_small2")
+gdata <- readRDS("gdata.RDS") #from clean.R
+
+setwd("/Users/Anika/Documents/R/FIA_small2")
+grdata <- readRDS("gdataGR1.RDS") #grdata has fixers and non-fixers from plots with a fixer present
+
+########### Set parameters
+res <- 0.4 #leaf resorption 0.4 for normal, 1 for upper bound, res is amount lost here
+resr <- 0.73 #root resporption 0.73 for normal, 1 for upper bound, res is amount lost here
+setwd("/Users/Anika/Documents/GradSchool/FIA_EstimateProj/scripts")
+source("ndfa_bootstrapping.R") #go to this file, regular for normal, change to 1s for upper bound
+
+###########
+#recode -999.00 as na in tpha
+grdata[grdata$tpha1 == -999,]$tpha1 <- NA
+grdata[grdata$tpha2 == -999,]$tpha2 <- NA
+
+###########
+#remove islands (I think this isn't necessary, PR is still in the factor list but not present in data)
+grdata <- grdata[grdata$state != "PR",]
+
+#if dbh2=1.00 then set it to dbh1 value
+grdata[grdata$dbh2==1.00,]$dbh2 <- grdata[grdata$dbh2==1.00,]$dbh1
+
+###########
+#state scaling
+gplot <- gdata[!duplicated(gdata$pcn),]       #get unique plots in gdata
+grplot <- grdata[!duplicated(grdata$pcn),]    #get unique plots in grdata
+grstate <- count(grplot, state)
+gstate <- count(gplot, state)
+scale <- merge(gstate, grstate, by = "state")
+colnames(scale) <- c("state","gstate","grstate")
+scale <- mutate(scale, scaling = scale$gstate/scale$grstate)
+
+########### Step: Get biomass allocations
+#hardwood parameters (Jenkins, 2003)
+B0.foliage <- -4.0813
+B1.foliage <- 5.8816
+B0.roots <- -1.6911
+B1.roots <- 0.8160
+B0.bark <- -2.0129
+B1.bark <- -1.6805
+B0.wood <- -0.3065
+B1.wood <- -5.4240
+
+# agb fraction from Jenssen
+b.foliage <- exp(B0.foliage+(B1.foliage/grdata$dbh2))
+b.bark <- exp(B0.bark+(B1.bark/grdata$dbh2))
+b.wood <- exp(B0.wood+(B1.wood/grdata$dbh2))
+b.root <- exp(B0.roots+(B1.roots/grdata$dbh2))
+b.other <- 1 - (b.foliage+b.bark+b.wood)
+
+grdata[grdata$agb2 < 0.1,]$agb2 <- grdata[grdata$agb2 < 0.1,]$agb1
+grdata$agbd <- grdata$agb2 - grdata$agb1
+grdata[grdata$agbd < 0,]$agbd <- 0.05
+
+#get change in biomass (kgC in foliage and wood)
+plot_agb <- grdata %>% 
+  mutate(agb.foliage = exp(B0.foliage+(B1.foliage/dbh2))*agb2,
+         agb.wood = (agbd)/t,
+         bgb.root = exp(B0.roots+(B1.roots/grdata$dbh2))*agb2)
+# should agb.wood = ((agbd)/t)*(b.wood+b.bark)
+
+#use C:N ratios since biomass is in KgC
+cn.foliage <- 15  #Ferlian et al, 2017
+cn.wood <- 465    #Johnson et al, 2014 (from sugar maple)
+cn.fr <- 43       #Gordon & Jackson, 2000
+
+########### Step: Calculate N used
+# foliage (full crown of foliage)
+fol <- plot_agb %>% 
+  mutate(foliage = ifelse(Genus %in% c("Acacia"), agb.foliage*ndfas$aca*(1/cn.foliage)*tpha1, 
+                          ifelse(Genus %in% c("Albizia"), agb.foliage*ndfas$alb*(1/cn.foliage)*tpha1,
+                                 ifelse(Genus %in% c("Alnus"), agb.foliage*ndfas$ald*(1/cn.foliage)*tpha1,
+                                        ifelse(Genus %in% c("Cercocarpus"), agb.foliage*ndfas$other*(1/cn.foliage)*tpha1,
+                                               ifelse(Genus %in% c("Prosopis"), agb.foliage*ndfas$pro*(1/cn.foliage)*tpha1, 
+                                                      ifelse(Genus %in% c("Casuarina"), agb.foliage*ndfas$cas*(1/cn.foliage)*tpha1,
+                                                             ifelse(Genus %in% c("Ebenopsis"), agb.foliage*ndfas$other*(1/cn.foliage)*tpha1,
+                                                                    ifelse(Genus %in% c("Sophora"), agb.foliage*ndfas$other*(1/cn.foliage)*tpha1,
+                                                                           ifelse(Genus %in% c("Robinia"), agb.foliage*ndfas$rob*(1/cn.foliage)*tpha1,
+                                                                                  ifelse(Genus %in% c("Olneya"), agb.foliage*ndfas$other*(1/cn.foliage)*tpha1,
+                                                                                         ifelse(Genus %in% c("Elaeagnus"), agb.foliage*ndfas$ela*(1/cn.foliage)*tpha1,
+                                                                                                0))))))))))))
+
+woodc <- fol %>% 
+  mutate(wood = ifelse(Genus %in% c("Acacia"), agb.wood/t*ndfas$aca*(1/cn.wood)*tpha1, 
+                       ifelse(Genus %in% c("Albizia"), agb.wood/t*ndfas$alb*(1/cn.wood)*tpha1,
+                              ifelse(Genus %in% c("Alnus"), agb.wood/t*ndfas$ald*(1/cn.wood)*tpha1,
+                                     ifelse(Genus %in% c("Cercocarpus"), agb.wood/t*ndfas$other*(1/cn.wood)*tpha1,
+                                            ifelse(Genus %in% c("Prosopis"), agb.wood/t*ndfas$pro*(1/cn.wood)*tpha1, 
+                                                   ifelse(Genus %in% c("Casuarina"), agb.wood/t*ndfas$cas*(1/cn.wood)*tpha1,
+                                                          ifelse(Genus %in% c("Ebenopsis"), agb.wood/t*ndfas$other*(1/cn.wood)*tpha1,
+                                                                 ifelse(Genus %in% c("Sophora"), agb.wood/t*ndfas$other*(1/cn.wood)*tpha1,
+                                                                        ifelse(Genus %in% c("Robinia"), agb.wood/t*ndfas$rob*(1/cn.wood)*tpha1,
+                                                                               ifelse(Genus %in% c("Olneya"), agb.wood/t*ndfas$other*(1/cn.wood)*tpha1,
+                                                                                      ifelse(Genus %in% c("Elaeagnus"), agb.wood/t*ndfas$ela*(1/cn.wood)*tpha1,
+                                                                                             0))))))))))))
+
+biom <- woodc %>%
+  group_by(state) %>%
+  summarize(foli = sum(foliage)*res, woo = sum(wood)) %>%
+  mutate(total = foli+woo) #total gives kgN/year
+
+biomass <- merge(biom,scale,by="state")
+kgN <- sum((biomass$total*biomass$scaling),na.rm=T)*2428.114
+kgN #total N fixed with %ndfa method without roots
+
+###########
+#belowground biomass (Li, 2003)
+biot <- woodc %>%
+  mutate(rb = (1.576*((agb2+agb1)/2))^0.615) %>%
+  mutate(pfr = 0.072 + 0.354*exp(-0.06*rb)) %>%
+  mutate(fr = rb*pfr) %>%
+  mutate(frt = 0.641*fr)
+
+# biofr <- biot %>%
+#   mutate(rootn = (1/cn.fr)*frt*fr)
+
+biofr <- biot %>%
+  mutate(rootn = ifelse(FIX==1, (1/cn.fr)*fr,
+                        0))
+
+# biofr <- biot %>%
+#   mutate(rootn = (1/cn.fr)*fr) #does not include turnover rate
+
+#incorporate resorption and remove nonfixers
+biofr$root <- biofr$rootn*resr
+biofr$total <- biofr$wood+biofr$foliage+biofr$root
+biofr$foliage <- biofr$foliage*res
+
+biofr[!is.na(biofr$pcn),]
+
+setwd("/Users/Anika/Documents/GradSchool/FIA_EstimateProj/data")
+#saveRDS(biofr, "GR_ndfa.RDS")
+
+#remove nonfixers
+biomr <- biofr %>%
+  group_by(state) %>%
+  summarize(foli = sum(foliage,na.rm=T), woo = sum(wood,na.rm=T), roo = sum(rootn,na.rm=T)) %>%
+  mutate(total = foli+woo+roo) #total gives kgN/year
+
+biomp <- biofr %>%
+  group_by(pcn) %>%
+  summarize(tot=sum(total), tottpha=sum(total*tpha2))
+
+(sum((biomp$tot),na.rm=T))/length(unique(grdata$pcn)) #kgN/ha/yr with %ndfa method
+
+biomassr <- merge(biomr,scale,by="state")
+kgN <- sum((biomassr$total*biomassr$scaling),na.rm=T)*2428.114
+kgN
+
+test <- biofr %>%
+  group_by(pcn) %>%
+  summarize(pfix=sum(fix.r,na.rm=T))
+
+#----------------------sensitivity analysis-----------------------------------
+
+####################
+# change fraction N in foliage
+# change C:N ratios
+###################
+
+sensfol <- 1 #make foliage 150% larger=1.5, normal=1
+senscnfol <- 1 #make C:N ratio 150% larger=1.5, normal=1
+senscnwood <- 1
+senscnfr <- 0.5
+
+#use C:N ratios since biomass is in KgC
+cn.foliage <- 15*senscnfol  #Ferlian et al, 2017
+cn.wood <- 465*senscnwood    #Johnson et al, 2014 (from sugar maple)
+cn.fr <- 43*senscnfr       #Gordon & Jackson, 2000
+
+#get change in biomass (kgC in foliage and wood) but increase or decrease foliage
+plot_agb <- grdata %>% 
+  mutate(agb.foliage = exp(B0.foliage+(B1.foliage/dbh2))*agb2*sensfol,
+         agb.wood = (agbd)/t,
+         bgb.root = exp(B0.roots+(B1.roots/grdata$dbh2))*agb2)
+# foliage (full crown of foliage)
+fol <- plot_agb %>% 
+  mutate(foliage = ifelse(Genus %in% c("Acacia"), agb.foliage*ndfas$aca*(1/cn.foliage)*tpha1, 
+                          ifelse(Genus %in% c("Albizia"), agb.foliage*ndfas$alb*(1/cn.foliage)*tpha1,
+                                 ifelse(Genus %in% c("Alnus"), agb.foliage*ndfas$ald*(1/cn.foliage)*tpha1,
+                                        ifelse(Genus %in% c("Cercocarpus"), agb.foliage*ndfas$other*(1/cn.foliage)*tpha1,
+                                               ifelse(Genus %in% c("Prosopis"), agb.foliage*ndfas$pro*(1/cn.foliage)*tpha1, 
+                                                      ifelse(Genus %in% c("Casuarina"), agb.foliage*ndfas$cas*(1/cn.foliage)*tpha1,
+                                                             ifelse(Genus %in% c("Ebenopsis"), agb.foliage*ndfas$other*(1/cn.foliage)*tpha1,
+                                                                    ifelse(Genus %in% c("Sophora"), agb.foliage*ndfas$other*(1/cn.foliage)*tpha1,
+                                                                           ifelse(Genus %in% c("Robinia"), agb.foliage*ndfas$rob*(1/cn.foliage)*tpha1,
+                                                                                  ifelse(Genus %in% c("Olneya"), agb.foliage*ndfas$other*(1/cn.foliage)*tpha1,
+                                                                                         ifelse(Genus %in% c("Elaeagnus"), agb.foliage*ndfas$ela*(1/cn.foliage)*tpha1,
+                                                                                                0))))))))))))
+
+
+
+woodc <- fol %>% 
+  mutate(wood = ifelse(Genus %in% c("Acacia"), agb.wood/t*ndfas$aca*(1/cn.wood)*tpha1, 
+                       ifelse(Genus %in% c("Albizia"), agb.wood/t*ndfas$alb*(1/cn.wood)*tpha1,
+                              ifelse(Genus %in% c("Alnus"), agb.wood/t*ndfas$ald*(1/cn.wood)*tpha1,
+                                     ifelse(Genus %in% c("Cercocarpus"), agb.wood/t*ndfas$other*(1/cn.wood)*tpha1,
+                                            ifelse(Genus %in% c("Prosopis"), agb.wood/t*ndfas$pro*(1/cn.wood)*tpha1, 
+                                                   ifelse(Genus %in% c("Casuarina"), agb.wood/t*ndfas$cas*(1/cn.wood)*tpha1,
+                                                          ifelse(Genus %in% c("Ebenopsis"), agb.wood/t*ndfas$other*(1/cn.wood)*tpha1,
+                                                                 ifelse(Genus %in% c("Sophora"), agb.wood/t*ndfas$other*(1/cn.wood)*tpha1,
+                                                                        ifelse(Genus %in% c("Robinia"), agb.wood/t*ndfas$rob*(1/cn.wood)*tpha1,
+                                                                               ifelse(Genus %in% c("Olneya"), agb.wood/t*ndfas$other*(1/cn.wood)*tpha1,
+                                                                                      ifelse(Genus %in% c("Elaeagnus"), agb.wood/t*ndfas$ela*(1/cn.wood)*tpha1,
+                                                                                             0))))))))))))
+
+biom <- woodc %>%
+  group_by(state) %>%
+  summarize(foli = sum(foliage)*res, woo = sum(wood)) %>%
+  mutate(total = foli+woo) #total gives kgN/year
+
+biomass <- merge(biom,scale,by="state")
+kgN <- sum((biomass$total*biomass$scaling),na.rm=T)*2428.114
+kgN #total N fixed with %ndfa method without roots
+
+#belowground biomass (Li, 2003)
+biot <- woodc %>%
+  mutate(rb = (1.576*((agb2+agb1)/2))^0.615) %>%
+  mutate(pfr = 0.072 + 0.354*exp(-0.06*rb)) %>%
+  mutate(fr = rb*pfr) %>%
+  mutate(frt = 0.641*fr)
+
+biofr <- biot %>%
+  mutate(rootn = ifelse(FIX==1, (1/cn.fr)*fr,
+                        0))
+
+#incorporate resorption and remove nonfixers
+biofr$root <- biofr$rootn*resr
+biofr$total <- biofr$wood+biofr$foliage+biofr$root
+biofr$foliage <- biofr$foliage*res
+
+#biofr[!is.na(biofr$pcn),]
+#remove nonfixers
+biomr <- biofr %>%
+  group_by(state) %>%
+  summarize(foli = sum(foliage,na.rm=T), woo = sum(wood,na.rm=T), roo = sum(rootn,na.rm=T)) %>%
+  mutate(total = foli+woo+roo) #total gives kgN/year
+
+biomp <- biofr %>%
+  group_by(pcn) %>%
+  summarize(tot=sum(total), tottpha=sum(total*tpha2))
+
+(sum((biomp$tot),na.rm=T))/length(unique(grdata$pcn)) #kgN/ha/yr with %ndfa method
+
+biomassr <- merge(biomr,scale,by="state")
+kgN <- sum((biomassr$total*biomassr$scaling),na.rm=T)*2428.114
+kgN
+(kgN-2875096172)/2875096172
+
+```
+
+## Map outputs:
+Map the basal area, fixation rate for both methods, and genus specific fixation rates
+
+```{r map, message=FALSE, warning=FALSE}
+library(fields)
+
+############ Step1: Load cleaned & processed data (made in clean.R and do.R)
+setwd("/Users/Anika/Documents/GradSchool/FIA_EstimateProj/ACGCA_FIAv51_from_JWL")
+p <- read.csv("ACGCA_FIAv51_plot.csv",header=T)
+p <- p[p$state!='PR'&p$state!='VI'&p$state!='HI', ]
+p[p$lat==-999,]$lat <- NA
+p[p$lon==-999,]$lon <- NA
+
+#for trees only
+setwd("/Users/Anika/Documents/R/FIA_small2")
+gdata <- readRDS("gdata.RDS") #from clean.R
+d <- gdata
+#gfdata <- readRDS("gfdata.RDS") #from do.R
+plot_fix <- readRDS("gfdata_fix.RDS") #from do.R
+
+#for saplings and tree data
+setwd("/Users/Anika/Documents/GradSchool/FIA_EstimateProj/output")
+d <- readRDS("treesapfix.RDS")
+
+fixcut <- 0.9 # 1 for confirmed fixers
+latcut <- 35
+
+############ Step4: Duncan's code
+p$llu <- p$lat/100 + p$lon*100
+pu <- p[!duplicated(p$llu),]
+# Number of plot record and unique plots
+print(nrow(p))
+print(nrow(pu))
+# Number of fixers and non-fixers
+nrow(gdata[gdata$FIX==1,])
+nrow(gdata[gdata$FIX==0,])
+
+### Figure 2a: map of plot density
+# Get latitude and longitude bounds of AK, coterminous US, Mexico, PR, VI
+latmin <- min(p$lat,na.rm=TRUE)
+latmax <- max(p$lat,na.rm=TRUE)
+lonmin <- min(p$lon,na.rm=TRUE)
+lonmax <- max(p$lon,na.rm=TRUE)
+latminint <- floor(latmin)
+latmaxint <- ceiling(latmax)
+lonminint <- floor(lonmin)
+lonmaxint <- ceiling(lonmax)
+dlat <- 1 # grid cell size
+dlon <- 1 # grid cell size
+lat.list <- seq(latminint,latmaxint,dlat)
+lon.list <- seq(lonminint,lonmaxint,dlon)
+nlat <- length(lat.list)
+nlon <- length(lon.list)
+
+# Make matrix of plot numbers
+nplot.grid <- plotarea.grid <- array(dim=c(nlon,nlat)) # plot area in ha
+nuniqueplot.grid <- uniqueplotarea.grid <- array(dim=c(nlon,nlat)) # unique plot number
+infys.plotarea <- (11.3^2)*pi*4/10000
+fia.avg.plotarea <- (7.3^2)*pi*4/10000
+for(i in 1:nlon){
+  print(i/nlon*100)
+  lon.a <- lon.list[i] - dlon/2
+  lon.b <- lon.list[i] + dlon/2
+  for(j in 1:nlat){
+    lat.a <- lat.list[j] - dlat/2
+    lat.b <- lat.list[j] + dlat/2
+    nplot.grid[i,j] <- sum(p$lon>=lon.a & p$lon<lon.b & 
+                             p$lat>=lat.a & p$lat<lat.b,na.rm=TRUE)
+    nuniqueplot.grid[i,j] <- sum(pu$lon>=lon.a & pu$lon<lon.b & 
+                                   pu$lat>=lat.a & pu$lat<lat.b,na.rm=TRUE)
+    plotarea.grid[i,j] <- sum(p$lon>=lon.a & p$lon<lon.b & 
+                                p$lat>=lat.a & p$lat<lat.b,na.rm=TRUE)*fia.avg.plotarea + 
+      sum(p$lon>=lon.a & p$lon<lon.b & 
+            p$lat>=lat.a & p$lat<lat.b & p$dataID==2,na.rm=TRUE)*infys.plotarea
+    uniqueplotarea.grid[i,j] <- sum(pu$lon>=lon.a & pu$lon<lon.b & 
+                                      pu$lat>=lat.a & pu$lat<lat.b,na.rm=TRUE)*fia.avg.plotarea #+ 
+      # sum(pu$lon>=lon.a & pu$lon<lon.b & 
+      #       pu$lat>=lat.a & pu$lat<lat.b & pu$dataID==2,na.rm=TRUE)*infys.plotarea
+    if(nplot.grid[i,j]==0){
+      nplot.grid[i,j] <- NA
+      nuniqueplot.grid[i,j] <- NA
+      plotarea.grid[i,j] <- NA
+      uniqueplotarea.grid[i,j] <- NA
+    }
+  }
+}
+
+nlev <- 64
+ticks <- 2^(0:13)
+image.plot(lon.list, lat.list, log(nplot.grid), nlevel=nlev, col=tim.colors(nlev),
+           axis.args=list( at=log(ticks),labels=ticks),
+           xlab="longitude",ylab="latitude",
+           #ylim=c(14,33),xlim=c(-120,-80))
+           ylim=c(latminint-1,latmaxint+1),xlim=c(lonminint-2,lonmaxint+1))
+title(main="Plot records")
+#mtext("(a)",font=2,adj=0.01,padj=-0.5)
+map('world',regions='usa',add=TRUE)
+
+nlev <- 64
+ticks <- 2^(0:13)
+image.plot(lon.list, lat.list, log(nuniqueplot.grid), nlevel=nlev, col=tim.colors(nlev),
+           axis.args=list( at=log(ticks),labels=ticks),
+           xlab="longitude",ylab="latitude",
+           #ylim=c(14,33),xlim=c(-120,-80))
+           ylim=c(latminint-1,latmaxint+1),xlim=c(lonminint-2,lonmaxint+1))
+title(main="Number of plots")
+#mtext("(a)",font=2,adj=0.01,padj=-0.5)
+map('world',regions='usa',add=TRUE)
+
+
+# Plot area as well to make sure it worked ok
+ticks <- 2^(0:13)
+image.plot(lon.list, lat.list, log(uniqueplotarea.grid), nlevel=nlev, col=tim.colors(nlev),
+           axis.args=list( at=log(ticks),labels=ticks),
+           xlab="longitude",ylab="latitude",
+           #ylim=c(14,33),xlim=c(-120,-80))
+           ylim=c(latminint-1,latmaxint+1),xlim=c(lonminint-2,lonmaxint+1))
+title(main="Sampling area (ha)")
+#mtext("(a)",font=2,adj=0.01,padj=-0.5)
+map('world',regions='usa',add=TRUE)
+
+### Fig. 2b: Relative basal area across latitude and gridded
+# Need plot-level, grid-cell-level, and latitude-level values
+# Need pba of all fixers, pba of rhizobials, pba of actinorhizals
+
+# plot-level basal area
+
+#d[is.na(d$tpha),]$tpha <- 14.87 ##median value (fills 57488 NAs)
+d$pBA <- d$BAm2*d$tpha #don't need if using tree/sapling combined data (already calc)
+
+
+fixcut <- 0.9
+a <- as.data.frame.table(by(d$pBA,d$pcn,sum))
+a <- data.frame(pcn=as.numeric(as.character(a[,1])),tba=as.numeric(a[,2]))
+p <- merge(p,a,by="pcn",all.x=TRUE,all.y=FALSE) #if tba is 0 that means no fixers in plot
+
+af <- as.data.frame.table(by(d[d$FIX>=fixcut,]$pBA,
+                             d[d$FIX>=fixcut,]$pcn,sum))
+af <- data.frame(pcn=as.numeric(as.character(af[,1])),
+                 fba=as.numeric(af[,2]))
+ar <- as.data.frame.table(by(d[d$FIX>=fixcut & d$ACT1vsRIZ0==0,]$pBA,
+                             d[d$FIX>=fixcut & d$ACT1vsRIZ0==0,]$pcn,sum))
+ar <- data.frame(pcn=as.numeric(as.character(ar[,1])),
+                 rba=as.numeric(ar[,2]))
+aa <- as.data.frame.table(by(d[d$FIX>=fixcut & d$ACT1vsRIZ0==1,]$pBA,
+                             d[d$FIX>=fixcut & d$ACT1vsRIZ0==1,]$pcn,sum))
+aa <- data.frame(pcn=as.numeric(as.character(aa[,1])),
+                 aba=as.numeric(aa[,2]))
+p <- merge(p,af,by="pcn",all.x=TRUE,all.y=FALSE)
+p <- merge(p,ar,by="pcn",all.x=TRUE,all.y=FALSE)
+p <- merge(p,aa,by="pcn",all.x=TRUE,all.y=FALSE)
+p[is.na(p$fba),]$fba <- 0
+p[is.na(p$rba),]$rba <- 0
+p[is.na(p$aba),]$aba <- 0
+p$pfba <- p$fba/p$tba*100 ##some tba are NA no fixers in plot
+p$prba <- p$rba/p$tba*100
+p$paba <- p$aba/p$tba*100
+
+e <- plot_fix
+an <- as.data.frame.table(by(e$fix.r,e$pcn,mean)) #for normal data
+an <- data.frame(pcn=as.numeric(as.character(an[,1])),fixr=as.numeric(an[,2]))
+p <- merge(p,an,by="pcn",all.x=TRUE,all.y=FALSE)
+
+# pfba = plot basal area all fixers
+# prba = plot basal area of rhizobials
+# paba = plot basal area of actinorhizals
+
+# grid-cell-level across continent
+pfba.grid <- prba.grid <- paba.grid <- pfs.grid <- prs.grid <- pas.grid <- fba.grid <- fn.grid <- aca.grid <- alb.grid <- oln.grid <- pro.grid <- rob.grid <- aln.grid <- cas.grid <- cer.grid <- ela.grid <- array(dim=c(nlon,nlat))
+for(i in 1:nlon){
+  print(i/nlon*100)
+  lon.a <- lon.list[i] - dlon/2
+  lon.b <- lon.list[i] + dlon/2
+  for(j in 1:nlat){
+    lat.a <- lat.list[j] - dlat/2
+    lat.b <- lat.list[j] + dlat/2
+    inds <- which(p$lon>=lon.a & p$lon<lon.b & p$lat>=lat.a & p$lat<lat.b)
+    #inds1 <- which(plot_fix$lon>=lon.a & plot_fix$lon<lon.b & plot_fix$lat>=lat.a & plot_fix$lat<lat.b) #normal data
+    inds1 <- which(d$lon>=lon.a & d$lon<lon.b & d$lat>=lat.a & d$lat<lat.b) #dr data
+  #  inds <- p$lon>=lon.a & p$lon<lon.b & p$lat>=lat.a & p$lat<lat.b
+    if(sum(inds)>0){
+      pfba.grid[i,j] <- weighted.mean(p[inds,]$pfba,p[inds,]$tba,na.rm=TRUE)
+      prba.grid[i,j] <- weighted.mean(p[inds,]$prba,p[inds,]$tba,na.rm=TRUE)
+      paba.grid[i,j] <- weighted.mean(p[inds,]$paba,p[inds,]$tba,na.rm=TRUE)
+      fba.grid[i,j] <- mean(plot_fix[inds1,]$BAm2*plot_fix[inds,]$tpha, na.rm=TRUE) #normal data
+      #fba.grid[i,j] <- mean(d[inds1,]$BAm2*d[inds,]$tpha, na.rm=TRUE) #dr data
+      fn.grid[i,j] <- mean(p[inds,]$fix.r,na.rm=TRUE)
+    }else{
+      pfba.grid[i,j] <- NA
+      prba.grid[i,j] <- NA
+      paba.grid[i,j] <- NA
+      fba.grid[i,j] <- NA
+      fn.grid[i,j] <- NA
+    }
+  }
+}
+
+
+#loop for fixation rate
+fba.grid <- fn.grid <- array(dim=c(nlon,nlat))
+for(i in 1:nlon){
+  print(i/nlon*100)
+  lon.a <- lon.list[i] - dlon/2
+  lon.b <- lon.list[i] + dlon/2
+  for(j in 1:nlat){
+    lat.a <- lat.list[j] - dlat/2
+    lat.b <- lat.list[j] + dlat/2
+    inds <- which(plot_fix$lon>=lon.a & plot_fix$lon<lon.b & plot_fix$lat>=lat.a & plot_fix$lat<lat.b) #normal data
+    #inds <- which(d$lon>=lon.a & d$lon<lon.b & d$lat>=lat.a & d$lat<lat.b) #dr data
+    #  inds <- p$lon>=lon.a & p$lon<lon.b & p$lat>=lat.a & p$lat<lat.b
+    if(sum(inds)>0){
+      fba.grid[i,j] <- mean((plot_fix[inds,]$BAm2*plot_fix[inds,]$tpha), na.rm=TRUE) #normal data
+      #fba.grid[i,j] <- mean((d[inds,]$BAm2*d[inds,]$tpha), na.rm=TRUE) #dr data
+      fn.grid[i,j] <- mean(plot_fix[inds,]$fix.r,na.rm=TRUE) #normal data
+      #fn.grid[i,j] <- mean(d[inds,]$fix.dr,na.rm=TRUE) #dr data
+    }else{
+      fba.grid[i,j] <- NA
+      fn.grid[i,j] <- NA
+    }
+  }
+}
+
+##map of % BA here!
+nlev <- 64
+ticks <- 2^(0:13)
+image.plot(lon.list, lat.list, pfba.grid, nlevel=nlev, col=tim.colors(nlev),
+           axis.args=list(at=(ticks),labels=ticks),
+           xlab="longitude",ylab="latitude",
+           #ylim=c(14,33),xlim=c(-120,-80))
+           ylim=c(latminint-1,latmaxint+1),xlim=c(lonminint-2,lonmaxint+1))
+title(main="Percent Fixing BA", cex.main=1.5)
+#mtext("(a)",font=2,adj=0.01,padj=-0.5)
+map('world',regions='usa',add=TRUE)
+
+######map of stand level BA here!
+nlev <- 64
+ticks <- 2^(0:13)
+image.plot(lon.list, lat.list, log(fba.grid+0.01), nlevel=nlev, col=tim.colors(nlev),
+           axis.args=list(at=log(ticks),labels=ticks),
+           xlab="longitude",ylab="latitude",
+           #ylim=c(14,33),xlim=c(-120,-80))
+           ylim=c(latminint-1,60+1),xlim=c(-140-2,lonmaxint+1))
+#title(main="Basal Area (m2/ha)")
+title(main=expression("Fixer Basal Area"~(m^{2}~"/ha")), cex.main=1.5)
+#mtext("(a)",font=2,adj=0.01,padj=-0.5)
+map('world',regions='usa',add=TRUE)
+
+##map of fixed nitrogen rate average in cell
+nlev <- 64
+ticks <- 2^(-2:13)
+image.plot(lon.list, lat.list, log(fn.grid+0.1), nlevel=nlev, col=tim.colors(nlev),
+           axis.args=list(at=log(ticks),labels=ticks),
+           xlab="longitude",ylab="latitude",
+           #ylim=c(14,33),xlim=c(-120,-80))
+           ylim=c(latminint-1,60+1),xlim=c(-140,lonmaxint+1))
+title(main="N Fixation Rate (kgN/ha/yr)", cex.main=1.5)
+#mtext("(a)",font=2,adj=0.01,padj=-0.5)
+map('world',regions='usa',add=TRUE)
+
+#average fixed nitrogen rate
+mean(plot_fix$fix.r,na.rm=TRUE)
+
+#saveRDS(fn.grid,"SNF_grid_mat.RDS")
+
+# ------------------------------------- %ndfa ----------------------------------------
+#look in doDEP.R is something for this analysis is missing (that's where this came from...)
+setwd("/Users/Anika/Documents/GradSchool/FIA_EstimateProj/data")
+wood <- readRDS("GR_ndfa.RDS") #from doGR.R
+# Remove extreme outliers
+wood <- wood[wood$wood < 2,]
+wood <- wood[wood$total < 10 & wood$total > 0,]
+
+setwd("/Users/Anika/Documents/GradSchool/FIA_EstimateProj/ACGCA_FIAv51_from_JWL")
+p <- read.csv("ACGCA_FIAv51_plot.csv",header=T)
+p <- p[p$state!='PR'&p$state!='VI'&p$state!='HI', ]
+p[p$lat==-999,]$lat <- NA
+p[p$lon==-999,]$lon <- NA
+
+pw <- merge(p,wood,by.x="pcn",by.y="pcn2",all.x=FALSE,all.y=TRUE) 
+pw$llu <- pw$lat/100 + pw$lon*100
+wu <- pw[!duplicated(pw$llu),]
+# Number of plot record and unique plots
+print(nrow(pw))
+print(nrow(wu))
+
+# need to sum ndfa demand to plot level
+# then in loop take the mean value
+# divide mean value by size of fia plot in ha
+
+# grid-cell-level across continent
+grn.grid <- array(dim=c(nlon,nlat))
+fia.avg.plotarea <- (7.3^2)*pi*4/10000
+
+for(i in 1:nlon){
+  print(i/nlon*100)
+  lon.a <- lon.list[i] - dlon/2
+  lon.b <- lon.list[i] + dlon/2
+  
+  for(j in 1:nlat){
+    lat.a <- lat.list[j] - dlat/2
+    lat.b <- lat.list[j] + dlat/2
+    inds <- which(pw$lon >= lon.a & pw$lon < lon.b & pw$lat >= lat.a & pw$lat < lat.b) #normal data
+
+    if(sum(inds)>0){
+      # used tpha1 because fewer NAs
+      grn.grid[i,j] <- weighted.mean(pw[inds,]$total, pw[inds,]$tpha1, na.rm=T)
+      #grn.grid[i,j] <- mean((sum(pw[inds,]$wood*pw[inds,]$tpha1, na.rm=T)+sum(pw[inds,]$foliage*pw[inds,]$tpha1, na.rm=T)), na.rm=T)
+      #grn.grid[i,j] <- (sum(pw[inds,]$wood, na.rm=T)+sum(pw[inds,]$foliage,na.rm=T))/(length(inds)*fia.avg.plotarea) #need times tpha to get kgN/ha/yr
+    }else{
+      grn.grid[i,j] <- NA
+    }
+  }
+}
+
+##map of N demand based on ndfa
+nlev <- 64
+ticks <- 2^(-6:1)
+image.plot(lon.list, lat.list, log(grn.grid+0.0001), nlevel=nlev, col=tim.colors(nlev),
+           axis.args=list(at=log(ticks),labels=round(ticks, digits=2)),
+           xlab="longitude",ylab="latitude",
+           #ylim=c(14,33),xlim=c(-120,-80))
+           #ylim=c(latminint-1,latmaxint+1),xlim=c(lonminint-2,lonmaxint+1))
+           ylim=c(latminint-1,60+1),xlim=c(-140,lonmaxint+1))
+title(main="N demand by fixers (kgN/ha/yr)", cex.main=1.5)
+#mtext("(a)",font=2,adj=0.01,padj=-0.5)
+map('world',regions='usa',add=TRUE)
+
+# ----------------------------- FIGURE 2 ----------------------------------------
+
+par(oma=c(0,0,0,4))
+set.panel(1,2)
+
+##map of fixed nitrogen rate average in cell
+nlev <- 64
+ticks <- 2^(-2:13)
+image.plot(lon.list, lat.list, log(fn.grid+0.1), nlevel=nlev, col=tim.colors(nlev),
+           axis.args=list(at=log(ticks),labels=ticks),
+           xlab="longitude",ylab="latitude",
+           #ylim=c(14,33),xlim=c(-120,-80))
+           #ylim=c(latminint-1,60+1),xlim=c(-140,lonmaxint+1))
+           ylim=c(latminint-1,latmaxint+1),xlim=c(lonminint-2,lonmaxint+1))
+title(main=expression('N Fixation Rate (kg N ha'^-1*' yr'^-1*'), Accretion'), cex.main=1.5)
+#mtext("(a)",font=2,adj=0.01,padj=-0.5)
+map('world',regions='usa',add=TRUE)
+
+##map of N demand based on ndfa
+nlev <- 64
+ticks <- 2^(-6:1)
+image.plot(lon.list, lat.list, log(grn.grid+0.0001), nlevel=nlev, col=tim.colors(nlev),
+           axis.args=list(at=log(ticks),labels=round(ticks, digits=2)),
+           xlab="longitude",ylab="latitude",
+           #ylim=c(14,33),xlim=c(-120,-80))
+           ylim=c(latminint-1,latmaxint+1),xlim=c(lonminint-2,lonmaxint+1))
+title(main=expression('N Fixation Rate (kg N ha'^-1*' yr'^-1*'), %Ndfa'), cex.main=1.5)
+#mtext("(a)",font=2,adj=0.01,padj=-0.5)
+map('world',regions='usa',add=TRUE)
+
+# ------------------------------- %Ndfa ----------------------------------------
+#new here
+p1 <- merge(p, g, by="pcn", all.x=TRUE, all.y=TRUE)
+p1[is.na(p1$fix),]$fix <- 0
+p1[is.na(p1$plotBAt),]$plotBAt <- 0
+p2 <- merge(p, h, by="pcn", all.x=TRUE, all.y=TRUE)
+colnames(p2)[colnames(p2) == 'tottpha'] <- 'fix'
+p2[is.na(p2$fix),]$fix <- 0
+#end new
+
+
+# grid-cell-level
+fn.grid <- fd.grid <- fba.grid <- array(dim=c(nlon,nlat))
+for(i in 1:nlon){
+  print(i/nlon*100)
+  lon.a <- lon.list[i] - dlon/2
+  lon.b <- lon.list[i] + dlon/2
+  for(j in 1:nlat){
+    lat.a <- lat.list[j] - dlat/2
+    lat.b <- lat.list[j] + dlat/2
+    inds <- which(p2$lon>=lon.a & p2$lon<lon.b & p2$lat>=lat.a & p2$lat<lat.b)
+    inds1 <- which(p1$lon>=lon.a & p1$lon<lon.b & p1$lat>=lat.a & p1$lat<lat.b) #normal data
+    if(sum(inds1)>0){
+      fn.grid[i,j] <- mean(p1[inds1,]$fix,na.rm=TRUE)
+      fba.grid[i,j] <- mean(p1[inds1,]$plotBAt,na.rm=TRUE)
+    }else{
+      fn.grid[i,j] <- NA
+      fba.grid[i,j] <- NA
+    }
+    if(sum(inds)>0){
+      fd.grid[i,j] <- mean(p2[inds,]$fix,na.rm=TRUE)
+    }else{
+      fd.grid[i,j] <- NA
+    }
+  }
+}
+
+#map fixed n accretion
+setwd("/Users/Anika/Documents/GradSchool/FIA_EstimateProj/output")
+png('fixrate.png', width = 800, height = 600)
+nlev <- 64
+ticks <- 2^(0:13)
+image.plot(lon.list, lat.list, log(fn.grid+0.01), nlevel=nlev, col=tim.colors(nlev),
+           axis.args=list(at=log(ticks),labels=ticks),
+           legend.args=list( text="BNF Rate (kgN/ha/yr)", cex=1.5, side=4, line=2),
+           xlab="longitude",ylab="latitude",
+           #ylim=c(14,33),xlim=c(-120,-80))
+           ylim=c(latminint-1,latmaxint+1),xlim=c(-140-2,lonmaxint+1), frame.plot=F)
+title(main="Tree N Fixation Rate", cex.main=2.5)
+#mtext("(a)",font=2,adj=0.01,padj=-0.5)
+map('world',regions='usa',add=TRUE)
+dev.off()
+
+#map fixed n %ndfa
+setwd("/Users/Anika/Documents/GradSchool/FIA_EstimateProj/output")
+png('fixndfa.png', width = 800, height = 600)
+nlev <- 64
+ticks <- 2^(0:13)
+image.plot(lon.list, lat.list, log(fd.grid+0.01), nlevel=nlev, col=tim.colors(nlev),
+           axis.args=list(at=log(ticks),labels=ticks),
+           legend.args=list( text="BNF Rate (kgN/ha/yr)", cex=1.5, side=4, line=2),
+           xlab="longitude",ylab="latitude",
+           #ylim=c(14,33),xlim=c(-120,-80)), 
+           #zlim=c(log(0.01),log(32)), #use to match color scale to other map
+           ylim=c(latminint-1,latmaxint+1),xlim=c(-140-2,lonmaxint+1), frame.plot=F)
+title(main="%Ndfa", cex.main=2.5)
+#mtext("(a)",font=2,adj=0.01,padj=-0.5)
+map('world',regions='usa',add=TRUE)
+dev.off()
+
+#map fixer ba
+setwd("/Users/Anika/Documents/GradSchool/FIA_EstimateProj/output")
+png('fixerba.png', width = 900, height = 600)
+nlev <- 64
+ticks <- 2^(0:13)
+image.plot(lon.list, lat.list, log(fba.grid+0.001), nlevel=nlev, col=tim.colors(nlev),
+           axis.args=list(at=log(ticks),labels=ticks),
+           legend.args=list( text="Basal Area (m2/ha)", cex=1.5, side=4, line=2),
+           xlab="longitude",ylab="latitude",
+           #ylim=c(14,33),xlim=c(-120,-80))
+           ylim=c(latminint-1,latmaxint+1),xlim=c(-140-2,lonmaxint+1), frame.plot=F)
+title(main="N Fixing Tree Basal Area", cex.main=2.5)
+#mtext("(a)",font=2,adj=0.01,padj=-0.5)
+map('world',regions='usa',add=TRUE)
+dev.off()
+
+####### Save output
+setwd("/Users/Anika/Documents/GradSchool/FIA_EstimateProj/output")
+#saveRDS(fn.grid,"SNF_grid_mat.RDS")
+
+#########
+#loop for fixation rate
+fba.grid <- fn.grid <- array(dim=c(nlon,nlat))
+for(i in 1:nlon){
+  print(i/nlon*100)
+  lon.a <- lon.list[i] - dlon/2
+  lon.b <- lon.list[i] + dlon/2
+  for(j in 1:nlat){
+    lat.a <- lat.list[j] - dlat/2
+    lat.b <- lat.list[j] + dlat/2
+    #inds <- which(plot_fix$lon>=lon.a & plot_fix$lon<lon.b & plot_fix$lat>=lat.a & plot_fix$lat<lat.b) #normal data
+    inds <- which(d$lon>=lon.a & d$lon<lon.b & d$lat>=lat.a & d$lat<lat.b) #dr data
+    #  inds <- p$lon>=lon.a & p$lon<lon.b & p$lat>=lat.a & p$lat<lat.b
+    if(sum(inds)>0){
+      # fba.grid[i,j] <- mean((plot_fix[inds,]$BAm2*plot_fix[inds,]$tpha), na.rm=TRUE) #normal data
+      fba.grid[i,j] <- mean((d[inds,]$BAm2*d[inds,]$tpha), na.rm=TRUE) #dr data
+      fn.grid[i,j] <- mean(d[inds,]$fix.r,na.rm=TRUE) #normal data
+    }else{
+      fba.grid[i,j] <- NA
+      fn.grid[i,j] <- NA
+    }
+  }
+}
+
+# pfs.grid[i,j] <- weighted.mean(p[inds,]$pfs,p[inds,]$ts,na.rm=TRUE)
+# prs.grid[i,j] <- weighted.mean(p[inds,]$prs,p[inds,]$ts,na.rm=TRUE)
+# pas.grid[i,j] <- weighted.mean(p[inds,]$pas,p[inds,]$ts,na.rm=TRUE)
+
+
+##map of % BA here!
+nlev <- 64
+ticks <- 2^(0:13)
+image.plot(lon.list, lat.list, pfba.grid, nlevel=nlev, col=tim.colors(nlev),
+           axis.args=list(at=(ticks),labels=ticks),
+           xlab="longitude",ylab="latitude",
+           #ylim=c(14,33),xlim=c(-120,-80))
+           ylim=c(latminint-1,latmaxint+1),xlim=c(lonminint-2,lonmaxint+1))
+title(main="Percent Fixing BA", cex.main=1.5)
+#mtext("(a)",font=2,adj=0.01,padj=-0.5)
+map('world',regions='usa',add=TRUE)
+
+######map of stand level BA here!
+nlev <- 64
+ticks <- 2^(0:13)
+image.plot(lon.list, lat.list, log(fba.grid+1), nlevel=nlev, col=tim.colors(nlev),
+           axis.args=list(at=log(ticks),labels=ticks),
+           xlab="longitude",ylab="latitude",
+           #ylim=c(14,33),xlim=c(-120,-80))
+           ylim=c(latminint-1,60+1),xlim=c(-140-2,lonmaxint+1))
+#title(main="Basal Area (m2/ha)")
+title(main=expression("Fixer Basal Area"~(m^{2}~"/ha")), cex.main=1.5)
+#mtext("(a)",font=2,adj=0.01,padj=-0.5)
+map('world',regions='usa',add=TRUE)
+
+##map of fixed nitrogen rate average in cell
+nlev <- 64
+ticks <- 2^(-2:13)
+image.plot(lon.list, lat.list, log(fn.grid+0.1), nlevel=nlev, col=tim.colors(nlev),
+           axis.args=list(at=log(ticks),labels=ticks),
+           xlab="longitude",ylab="latitude",
+           #ylim=c(14,33),xlim=c(-120,-80))
+           ylim=c(latminint-1,60+1),xlim=c(-140,lonmaxint+1))
+title(main="N Fixation Rate (kgN/ha/yr)", cex.main=1.5)
+#mtext("(a)",font=2,adj=0.01,padj=-0.5)
+map('world',regions='usa',add=TRUE)
+
+#average fixed nitrogen rate
+mean(d$fix.r,na.rm=TRUE)
+#sum of nitrogen fixation
+sum(d$fix.r,na.rm=TRUE)*2428.114
+
+152221.4*2428.114*(nrow(p)/nrow(p1))
+152221.4*2428.114*(nrow(p)/181399)
+
+```
+
+## Map by genus
+Make map of BNF contributed by each genus.  
+acacia, albizia, olneya, prosopis, robinia, alnus, casuarina, cercocarpus, elaeagnus
+-aca.grid = acacia, acba
+-alb.grid = albizia, alba
+-oln.grid = olneya, olba
+-pro.grid = prosopis, poba
+-rob.grid = robinia, roba
+-aln.grid = alnus, anba
+-cas.grid = casuarina, caba
+-cer.grid = cercocarpus, ceba
+-ela.grid = elaeagnus, elba
+
+```{r map-genus, message=FALSE, warning=FALSE}
+########## Genus specific fixation
+# acacia, albizia, olneya, prosopis, robinia, alnus, casuarina, cercocarpus, elaeagnus
+aca <- d %>% filter(Genus %in% c("Acacia"))
+alb <- d %>% filter(Genus %in% c("Albizia"))
+oln <- d %>% filter(Genus %in% c("Olneya"))
+pro <- d %>% filter(Genus %in% c("Prosopis"))
+rob <- d %>% filter(Genus %in% c("Robinia"))
+aln <- d %>% filter(Genus %in% c("Alnus"))
+cas <- d %>% filter(Genus %in% c("Casuarina"))
+cer <- d %>% filter(Genus %in% c("Cercocarpus"))
+ela <- d %>% filter(Genus %in% c("Elaeagnus"))
+
+#get mean fixation rate by genus
+mean(aca$fix.r)
+mean(alb$fix.r)
+mean(oln$fix.r)
+mean(pro$fix.r)
+mean(rob$fix.r)
+mean(aln$fix.r)
+mean(cas$fix.r)
+mean(cer$fix.r)
+mean(ela$fix.r)
+
+# grid-cell-level across continent
+aca.grid <- alb.grid <- oln.grid <- pro.grid <- rob.grid <- aln.grid <- cas.grid <- cer.grid <- ela.grid <- array(dim=c(nlon,nlat))
+dfList <- list(aca=aca, alb=alb, aln=aln, pro=pro, rob=rob, aln=aln, cas=cas, cer=cer, ela=ela)
+for(k in 1:length(dfList)){
+  m <- get(names(dfList)[k])
+  q <- paste(names(dfList)[k],".grid",sep="")
+  out <- assign(q,array(dim=c(nlon,nlat)))
+  for(i in 1:nlon){
+    print(i/nlon*100)
+    lon.a <- lon.list[i] - dlon/2
+    lon.b <- lon.list[i] + dlon/2
+    for(j in 1:nlat){
+      lat.a <- lat.list[j] - dlat/2
+      lat.b <- lat.list[j] + dlat/2
+      inds <- which(m$lon>=lon.a & m$lon<lon.b & m$lat>=lat.a & m$lat<lat.b)
+      if(k==1&sum(inds)>0){
+        aca.grid[i,j] <- mean(m[inds,]$fix.r,na.rm=TRUE)
+      }else if(k==1&sum(inds)<=0){
+        aca.grid[i,j] <- NA
+      }else if(k==2&sum(inds)>0){
+        alb.grid[i,j] <- mean(m[inds,]$fix.r,na.rm=TRUE)
+      }else if(k==2&sum(inds)<=0){
+        alb.grid[i,j] <- NA
+      }else if(k==3&sum(inds)>0){
+        oln.grid[i,j] <- mean(m[inds,]$fix.r,na.rm=TRUE)
+      }else if(k==3&sum(inds)<=0){
+        oln.grid[i,j] <- NA
+      }else if(k==4&sum(inds)>0){
+        pro.grid[i,j] <- mean(m[inds,]$fix.r,na.rm=TRUE)
+      }else if(k==4&sum(inds)<=0){
+        pro.grid[i,j] <- NA
+      }else if(k==5&sum(inds)>0){
+        rob.grid[i,j] <- mean(m[inds,]$fix.r,na.rm=TRUE)
+      }else if(k==5&sum(inds)<=0){
+        rob.grid[i,j] <- NA
+      }else if(k==6&sum(inds)>0){
+        aln.grid[i,j] <- mean(m[inds,]$fix.r,na.rm=TRUE)
+      }else if(k==6&sum(inds)<=0){
+        aln.grid[i,j] <- NA
+      }else if(k==7&sum(inds)>0){
+        cas.grid[i,j] <- mean(m[inds,]$fix.r,na.rm=TRUE)
+      }else if(k==7&sum(inds)<=0){
+        cas.grid[i,j] <- NA
+      }else if(k==8&sum(inds)>0){
+        cer.grid[i,j] <- mean(m[inds,]$fix.r,na.rm=TRUE)
+      }else if(k==8&sum(inds)<=0){
+        cer.grid[i,j] <- NA
+      }else if(k==9&sum(inds)>0){
+        ela.grid[i,j] <- mean(m[inds,]$fix.r,na.rm=TRUE)
+      }else if(k==9&sum(inds)<=0){
+        ela.grid[i,j] <- NA
+      }
+    }
+  }
+}
+
+######map of genus specific fixation
+setwd("/Users/Anika/Documents/GradSchool/FIA_EstimateProj/output/")
+png("fixationmap_riz.png", width = 12, height = 6, units = 'in', res = 300)
+par(mfrow=c(2,3))
+par(mar=c(3.1,5.1,4.1,2.1)+0.1,oma=c(1,1,1,4),cex.main=1.5,
+    cex.lab=1.5,cex.axis=1.3,bty="n")
+# Acacia
+nlev <- 64
+#ticks <- 2^(0:13)
+ticks <- c(2,32,64,128)
+image.plot(lon.list, lat.list, aca.grid, nlevel=nlev, col=tim.colors(nlev),
+           axis.args=list(at=(ticks),labels=ticks, las=3),
+           xlab="",ylab="",
+           ylim=c(latminint-1,60+1),xlim=c(-140,lonmaxint+1),zlim=c(0,155))
+title(main=substitute(paste("", italic(Acacia))), cex.main=1.5)
+mtext("(a)",font=2,adj=0.01,padj=-0.5)
+map('world',regions='usa',add=TRUE)
+
+# Albizia
+image.plot(lon.list, lat.list, alb.grid, nlevel=nlev, col=tim.colors(nlev),
+           axis.args=list(at=(ticks),labels=ticks),
+           xlab="",ylab="",
+           ylim=c(latminint-1,60+1),xlim=c(-140,lonmaxint+1),zlim=c(0,155))
+title(main=substitute(paste("", italic(Albizia))), cex.main=1.5)
+mtext("(b)",font=2,adj=0.01,padj=-0.5)
+map('world',regions='usa',add=TRUE)
+
+# Olneya
+image.plot(lon.list, lat.list, oln.grid, nlevel=nlev, col=tim.colors(nlev),
+           axis.args=list(at=(ticks),labels=ticks),
+           legend.args=
+             list(text=expression(paste("BNF Rate (kg N ha"^"-1"," yr"^"-1",")")), 
+                  cex=1, side=4, line=4),
+           xlab="",ylab="",
+           ylim=c(latminint-1,60+1),xlim=c(-140,lonmaxint+1),zlim=c(0,155))
+title(main=substitute(paste("", italic(Olneya))), cex.main=1.5)
+mtext("(c)",font=2,adj=0.01,padj=-0.5)
+map('world',regions='usa',add=TRUE)
+
+# Prosopis
+image.plot(lon.list, lat.list, pro.grid, nlevel=nlev, col=tim.colors(nlev),
+           axis.args=list(at=(ticks),labels=ticks),
+           xlab="",ylab="",
+           ylim=c(latminint-1,60+1),xlim=c(-140,lonmaxint+1),zlim=c(0,155))
+title(main=substitute(paste("", italic(Prosopis))), cex.main=1.5)
+mtext("(d)",font=2,adj=0.01,padj=-0.5)
+map('world',regions='usa',add=TRUE)
+
+# Robinia
+image.plot(lon.list, lat.list, rob.grid, nlevel=nlev, col=tim.colors(nlev),
+           axis.args=list(at=(ticks),labels=ticks),
+           legend.args=
+             list(text=expression(paste("BNF Rate (kg N ha"^"-1"," yr"^"-1",")")),
+                  cex=1, side=4, line=4),           
+           xlab="",ylab="",
+           ylim=c(latminint-1,60+1),xlim=c(-140,lonmaxint+1),zlim=c(0,155))
+title(main=substitute(paste("", italic(Robinia))), cex.main=1.5)
+mtext("(e)",font=2,adj=0.01,padj=-0.5)
+map('world',regions='usa',add=TRUE)
+mtext("BNF Rate by Genus", outer = TRUE, cex = 1.3, line=-0.5)
+dev.off()
+
+setwd("/Users/Anika/Documents/GradSchool/FIA_EstimateProj/output/")
+png("fixationmap_act.png", width = 12, height = 6, units = 'in', res = 300)
+par(mfrow=c(2,3))
+par(mar=c(3.1,5.1,4.1,2.1)+0.1,oma=c(1,1,1,4),
+    cex.main=1.5,cex.lab=1.5,cex.axis=1.3,bty="n")
+# Alnus
+image.plot(lon.list, lat.list, aln.grid, nlevel=nlev, col=tim.colors(nlev),
+           axis.args=list(at=(ticks),labels=ticks),
+           ylim=c(latminint-1,60+1),xlim=c(-140,lonmaxint+1),zlim=c(0,155))
+title(main=substitute(paste("", italic(Alnus))), cex.main=1.5)
+mtext("(f)",font=2,adj=0.01,padj=-0.5)
+map('world',regions='usa',add=TRUE)
+
+# Casuarina
+image.plot(lon.list, lat.list, cas.grid, nlevel=nlev, col=tim.colors(nlev),
+           axis.args=list(at=(ticks),labels=ticks),
+           xlab="",ylab="",
+           ylim=c(latminint-1,60+1),xlim=c(-140,lonmaxint+1),zlim=c(0,155))
+title(main=substitute(paste("", italic(Casuarina))), cex.main=1.5)
+mtext("(g)",font=2,adj=0.01,padj=-0.5)
+map('world',regions='usa',add=TRUE)
+
+# Cercocarpus
+image.plot(lon.list, lat.list, cer.grid, nlevel=nlev, col=tim.colors(nlev),
+           axis.args=list(at=(ticks),labels=ticks),
+           legend.args=list(text=expression(paste("BNF Rate (kg N ha"^"-1"," yr"^"-1",")")), cex=1, side=4, line=4),
+           xlab="",ylab="",
+           ylim=c(latminint-1,60+1),xlim=c(-140,lonmaxint+1),zlim=c(0,155))
+title(main=substitute(paste("", italic(Cercocarpus))), cex.main=1.5)
+mtext("(h)",font=2,adj=0.01,padj=-0.5)
+map('world',regions='usa',add=TRUE)
+
+# Elaeagnus
+image.plot(lon.list, lat.list, ela.grid, nlevel=nlev, col=tim.colors(nlev),
+           axis.args=list(at=(ticks),labels=ticks),
+           legend.args=list(text=expression(paste("BNF Rate (kg N ha"^"-1"," yr"^"-1",")")), cex=1, side=4, line=4),           xlab="",ylab="",
+           ylim=c(latminint-1,60+1),xlim=c(-140,lonmaxint+1),zlim=c(0,155))
+title(main=substitute(paste("", italic(Elaeagnus))), cex.main=1.5)
+mtext("(i)",font=2,adj=0.01,padj=-0.5)
+map('world',regions='usa',add=TRUE)
+dev.off()
+```
+
+## Integrate N deposition, asymbiotic, and understory:
+Get N deposition for nitrate, nitrite, and ammonium. Also map the asymbiotic, understory, and total N.
+
+```{r ndep, message=FALSE, warnig=FALSE}
+require(rgdal)
+require(raster)
+require(sp)
+require(fields)
+
+############## Nitrogen Deposition ##############
+#Import N deposition data
+setwd("/Users/Anika/Documents/GradSchool/FIA_EstimateProj/Ndep_clim_nitrogen_730/data")
+
+#dry hno3
+N_HNO3 <- raster("NDDN_dry_deposition_hno3conc_hno3vd_0.5x0.5_grid_annual.txt")
+proj4string(N_HNO3) <- crs("+init=epsg:4326") #defining coordinate system to the WGS84 lat/long
+myCRS <- CRS(proj4string(N_HNO3))
+N_HNO3_1 <- projectRaster(N_HNO3, res=1, crs=myCRS)
+ncol <- 16
+plot(N_HNO3_1, xlab="lon", ylab="lat", main="N from Nitrate Deposition", xlim=c(-126,-66), ylim=c(24,51),
+     breaks=seq(0,ncol,by=1), col=terrain.colors(ncol))
+extent(N_HNO3_1)
+e <- extent(-135.82,-67+1,24,59.38)
+N_HNO3_1 <- extend(N_HNO3_1, e)
+plot(N_HNO3_1)
+
+#dry no3
+N_NO3 <- raster("NDDN_dry_deposition_no3conc_no3vd_0.5x0.5_grid_annual.txt")
+proj4string(N_NO3) <- crs("+init=epsg:4326") #defining coordinate system to the WGS84 lat/long
+N_NO3_1 <- projectRaster(N_NO3, res=1, crs=myCRS)
+e <- extent(-135.82,-67+1,24,59.38)
+N_NO3_1 <- extend(N_NO3_1, e)
+plot(N_NO3_1, xlab="lon", ylab="lat", 
+     main="N from Dry Nitrate Deposition")
+
+#wet no3
+N_NO3w <- raster("NADP_wet_deposition_no3_0.5x0.5_grid_annual_R1.txt")
+proj4string(N_NO3w) <- crs("+init=epsg:4326") #defining coordinate system to the WGS84 lat/long
+N_NO3w_1 <- projectRaster(N_NO3w, res=1, crs=myCRS)
+e <- extent(-135.82,-67+1,24,59.38)
+N_NO3w_1 <- extend(N_NO3w_1, e)
+plot(N_NO3w_1, xlab="lon", ylab="lat", 
+     main="N from Wet Nitrate Deposition")
+
+#total nh4
+N_NO3_T <- N_HNO3_1 + N_NO3_1 + N_NO3w_1
+plot(N_NO3_T, xlab="lon", ylab="lat", 
+     main="N from Nitrate Deposition")
+map('world',regions='usa',add=TRUE)
+
+#dry nh4
+N_NH4 <- raster("NDDN_dry_deposition_nh4conc_particulatevd_0.5x0.5_grid_annual.txt")
+proj4string(N_NH4) <- crs("+init=epsg:4326") #defining coordinate system to the WGS84 lat/long
+image(N_NH4)
+myCRS <- CRS(proj4string(N_NH4))
+N_NH4_1 <- projectRaster(N_NH4, res=1, crs=myCRS)
+e <- extent(-135.82,-67+1,24,59.38)
+N_NH4_1 <- extend(N_NH4_1, e)
+plot(N_NH4_1, xlab="lon", ylab="lat", 
+     main="N from Dry Ammonium Deposition")
+map('world',regions='usa',add=TRUE)
+extent(N_NH4_1)
+
+#wet nh4
+N_NH4w <- raster("NADP_wet_deposition_nh4_0.5x0.5_grid_annual_R1.txt")
+proj4string(N_NH4w) <- crs("+init=epsg:4326") #defining coordinate system to the WGS84 lat/long
+N_NH4w_1 <- projectRaster(N_NH4w, res=1, crs=myCRS)
+e <- extent(-135.82,-67+1,24,59.38)
+N_NH4w_1 <- extend(N_NH4w_1, e)
+plot(N_NH4w_1, xlab="lon", ylab="lat", 
+     main="N from Wet Ammonium Deposition")
+map('world',regions='usa',add=TRUE)
+
+#total nh4
+N_NH4_T <- N_NH4w_1 + N_NH4_1
+plot(N_NH4_T, xlab="lon", ylab="lat", 
+     main="N from Ammonium Deposition")
+map('world',regions='usa',add=TRUE)
+
+############## Forest Cover ##############
+#Import and project forest cover
+setwd("/Users/Anika/Documents/GradSchool/FIA_EstimateProj/foresti020l")
+FOR_COV_ORIG <- raster("foresti020l.tif")
+plot(FOR_COV_ORIG)
+proj4string(FOR_COV_ORIG) <- 
+  crs("+proj=laea +lat_0=45 
+      +lon_0=-100 +ellps=GRS80 
+      +towgs84=0,0,0,0,0,0,0 
+      +units=m +no_defs")
+#used bilinear
+#make masks to isolate forest
+FOR_MASK <- FOR_COV_ORIG #make mask for SNF data
+FOR_MASK[(FOR_MASK>2&FOR_MASK<23)] <- 10
+plot(FOR_MASK)
+FOR_MASK_1 <- FOR_MASK
+FOR_MASK_1[(FOR_MASK_1<10)|(FOR_MASK_1>=23)] <- 0
+plot(FOR_MASK_1)
+FOR_MASK_2 <- FOR_MASK_1
+FOR_MASK_2[FOR_MASK_2==10] <- 1
+plot(FOR_MASK_2)
+#reproject
+FOR_MASK_2r <- projectRaster(FOR_MASK_2, crs=crs(N_NH4w_1))
+#clip extent
+FOR_MASK_2s <- crop(FOR_MASK_2r, extent(N_NH4w_1))
+plot(FOR_MASK_2s)
+FOR_MASK_2_1s <- FOR_MASK_2s
+FOR_MASK_2_1s[FOR_MASK_2_1s>=0] <- 1
+
+#aggregate
+#aggregate(x, fact=2, fun=mean, expand=TRUE, na.rm=TRUE, filename='', ...) where  two integers (horizontal and vertical aggregation factor)
+Nhr <- dim(FOR_MASK_2s) # resolution of high-res raster
+Nlr <- dim(N_NH4w_1) # resolution of low-res raster
+Nratio <- c(as.integer(Nhr[2]/Nlr[2])+1,as.integer(Nhr[1]/Nlr[1])+1) # ratio of high to low resolutions, to nearest integer value for aggregation
+FOR_COV_FOR <- aggregate(FOR_MASK_2s, fact=Nratio, fun=sum) #fact=c(62,28) #gives raster of number of km^2 of forest within 1 degree cell
+FOR_COV_ALL <- aggregate(FOR_MASK_2_1s, fact=Nratio, fun=sum) #get total number km2 cells per degree2 cell
+FOR_COV <- FOR_COV_FOR/FOR_COV_ALL #frac of cell covered in forest
+plot(FOR_COV)
+#projectRaster(from, to, res, crs, method="bilinear", alignOnly=FALSE, over=FALSE, filename="", ...) 
+FOR_COV_ALIGN <- projectRaster(from=FOR_COV, to=N_NH4w_1, res=res(N_NH4w_1), crs=crs(N_NH4w_1), method="bilinear", alignOnly=FALSE, over=FALSE) 
+
+res(N_NO3)
+res(FOR_COV_ORIG)
+
+
+############## N-Fixing Trees ##############
+#Import and project SNF
+setwd("/Users/Anika/Documents/GradSchool/FIA_EstimateProj/output")
+SNF_GRID <- readRDS("SNF_grid_mat.RDS")
+SNF_RAS_0 <- raster(SNF_GRID)
+SNF_RAS <- t(flip(SNF_RAS_0, 1))
+SNF_extent <- extent(-155,-67+1,24,62+1) #xmin, xmax, ymin, ymax
+extent(SNF_RAS) <- SNF_extent
+plot(SNF_RAS, xlab="lon", ylab="lat", main="N from SNF Trees", xlim=c(-136,-66), ylim=c(24,60),zlim=c(0,24))
+map('world',regions='usa',add=TRUE)
+plot(SNF_RAS, xlim=c(-130,-110), ylim=c(40,55), main="SNF Ras")
+plot(N_NO3_1, xlim=c(-130,-110), ylim=c(40,55), sub="Nitrate", add=TRUE)
+#fill SNF_RAS missing values with 0 (make mask of FOR_COV_ALIGH, set all values to 0, add to SNF_RAS)
+FOR_COV_SNF <- FOR_COV_ALIGN
+FOR_COV_SNF[FOR_COV_SNF>=0.01] <- 0.01
+SNF_RASf <- SNF_RAS + FOR_COV_SNF
+plot(SNF_RASf)
+
+#make masks to check intersection
+SNF_MASK <- SNF_RASf #make mask for SNF data
+SNF_MASK[SNF_MASK>0] <- 1
+plot(SNF_MASK, main="SNF Mask")
+
+NO3_MASK <- N_NO3_1 #make mas for nitrate data
+NO3_MASK[NO3_MASK>0] <- 1
+plot(NO3_MASK, main="NO3 Mask")
+
+SNF_NO3_MASK <- SNF_MASK * NO3_MASK #where we have data for both data rasters
+plot(SNF_NO3_MASK)
+
+############## Understory/Asymbiotic ##############
+#understory
+FOR_COV_MASK <- FOR_COV_ALIGN * SNF_NO3_MASK #where we have data for both rasters
+N_UNDER <- 7.32*FOR_COV_MASK
+plot(N_UNDER, xlab="lon", ylab="lat", main="N from SNF Understory", zlim=c(0,24))
+map('world',regions='usa',add=TRUE)
+
+#asymbiotic
+N_ASYM <- 1.70*FOR_COV_ALIGN*SNF_NO3_MASK
+plot(N_ASYM, xlab="lon", ylab="lat", 
+     main="N from BNF Asymbiotic", 
+     zlim=c(0,24))
+map('world',regions='usa',add=TRUE)
+
+#make mask where 1 is when there should be forest
+FOR_COV_ALIGN_MASK <- FOR_COV_ALIGN
+FOR_COV_ALIGN_MASK[FOR_COV_ALIGN_MASK>0.001] <- 1
+FOR_COV_ALIGN_MASK[FOR_COV_ALIGN_MASK<=0.001] <- NA
+plot(FOR_COV_ALIGN_MASK)
+
+#Deposition
+N_dep <- N_NO3_T*FOR_COV_ALIGN*FOR_COV_ALIGN_MASK + N_NH4_T*FOR_COV_ALIGN*FOR_COV_ALIGN_MASK
+plot(N_dep, xlab="lon", ylab="lat", 
+     main="N from N Deposition", 
+     xlim=c(-126,-66), ylim=c(24,51), zlim=c(0,24))
+map('world',regions='usa',add=TRUE)
+
+#Calculate total N across grid cells
+N_NO3_Ty <- reclassify(N_NO3_T, cbind(NA, 0)) 
+N_NH4_Ty <- reclassify(N_NH4_T, cbind(NA, 0))
+N_TOT <- SNF_RASf + N_NO3_Ty*FOR_COV_ALIGN_MASK + N_NH4_Ty*FOR_COV_ALIGN_MASK + N_UNDER + N_ASYM
+plot(N_TOT, xlab="lon", ylab="lat", 
+     main="Total N input",zlim=c(0,24))
+map('world',regions='usa',add=TRUE)
+
+#Calculate percent SNF across grid cells
+N_PCT <- SNF_RASf/N_TOT
+plot(N_PCT*100, xlab="lon", ylab="lat", 
+     main="Percent N Input from SNF Trees")
+map('world',regions='usa',add=TRUE)
+
+#Percent symbiotic
+N_PCT_SNF <- (SNF_RASf*FOR_COV_ALIGN_MASK + N_UNDER*FOR_COV_ALIGN_MASK)/N_TOT*FOR_COV_ALIGN_MASK
+plot(N_PCT_SNF*100, xlab="lon", ylab="lat", 
+     main="Percent N Input from all SNF")
+map('world',regions='usa',add=TRUE)
+
+#Percent biological
+N_PCT_BIO <- (SNF_RASf + N_UNDER + N_ASYM)/N_TOT
+colfunc <- colorRampPalette(c("white", "black"))
+plot(N_PCT_SNF*100, xlab="lon", ylab="lat", 
+     main="Percent N Input from Biological Fixation", 
+     col=colfunc(10))
+#col=cm.colors(10)
+map('world',regions='usa',add=TRUE)
+
+#Nitrate deposition
+N_NO3_masked <- N_NO3_T*FOR_COV_ALIGN
+plot(N_NO3_masked, xlab="lon", ylab="lat", 
+     main="N from Nitrate Deposition", 
+     xlim=c(-126,-66), ylim=c(24,51))
+map('world',regions='usa',add=TRUE)
+
+
+##all maps together (FIGURE 6)
+label <- function(px, py, lab, ..., adj=c(0, 1)) {
+  usr <- par("usr")
+  text(usr[1] + px*(usr[2] - usr[1]),
+       usr[3] + py*(usr[4] - usr[3]),
+       lab, adj=adj, ...)
+}
+setwd("/Users/Anika/Documents/GradSchool/FIA_EstimateProj/output")
+png('figure6.png', width = 8, height = 9, units = 'in', res = 300)
+#par(mfrow=c(3, 2), mar=c(4.1, 2.1, 1.5, 0.5), oma=c(0, 2, 0, 0), mgp=c(2.25, 1, 0)) #keep all y-axes
+par(mfrow=c(3, 2), mar=c(4.1, 2.2, 2.2, 1), 
+    oma=c(0, 3, 3, 3), mgp=c(2.25, 1, 0)) #drop some y-axes, c(b,l,t,r)
+#trees zlim=c(0.001,50),
+ticks<-c(0,5,20,50)
+plot(sqrt((SNF_RASf*FOR_COV_ALIGN_MASK)),xlim=c(-136,-66), ylim=c(24,59), zlim=c(sqrt(0),sqrt(70)), cex.main=1.5, cex.lab=1.5, las=1,
+     axis.args=list(at=sqrt(ticks),labels=ticks),
+     legend.args=list(text=expression(paste("N Fixed (kg N ha"^"-1"," yr"^"-1",")")),
+                      side=4, line=3))
+map('world',regions='usa',add=TRUE)
+mtext("N from SNF Trees", 3, outer=FALSE, line=0.5, cex=1.5)
+label(.04, 0.96, "a)", cex=1.5)
+#understory zlim=c(0.001,16),
+ticks <- ticks <- c(0,5,20,50)
+plot(sqrt(N_UNDER), xlim=c(-136,-66), ylim=c(24,59), zlim=c(sqrt(0),sqrt(70)), cex.main=1.5, las=1, yaxt="n",
+     axis.args=list(at=sqrt(ticks),labels=ticks),
+     legend.args=list(text=expression(paste("N Fixed (kg N ha"^"-1"," yr"^"-1",")")),
+                      side=4, line=3))
+map('world',regions='usa',add=TRUE)
+mtext("N from SNF Understory", 3, outer=FALSE, line=0.5, cex=1.5)
+label(.04, .96, "b)", cex=1.5)
+#axis(2, labels=FALSE) #if you still want y tick marks
+#asymbiotic zlim=c(0.001,16),
+ticks <- c(0,5,20,50)
+plot(sqrt(N_ASYM), xlim=c(-136,-66), ylim=c(24,59), zlim=c(sqrt(0),sqrt(70)), cex.main=1.5, las=1,
+     axis.args=list(at=sqrt(ticks),labels=ticks),
+     legend.args=list(text=expression(paste("N Fixed (kg N ha"^"-1"," yr"^"-1",")")),
+                      side=4, line=3))
+map('world',regions='usa',add=TRUE)
+mtext("N from BNF Asymbiotic", 3, outer=FALSE, line=0.5, cex=1.5)
+label(.04, .96, "c)", cex=1.5)
+#deposition zlim=c(0,24)
+ticks <- c(0,5,20,50)
+plot(sqrt(N_dep), xlim=c(-136,-66), ylim=c(24,59), zlim=c(sqrt(0),sqrt(70)), cex.main=1.5, las=1, yaxt="n",
+     axis.args=list(at=sqrt(ticks),labels=ticks),
+     legend.args=list(text=expression(paste("N (kg N ha"^"-1"," yr"^"-1",")")), 
+                      side=4, line=3))
+map('world',regions='usa',add=TRUE)
+mtext("N from N Deposition", 3, outer=FALSE, line=0.5, cex=1.5)
+label(.04, .96, "d)", cex=1.5)
+#total N zlim=c(0,57),
+ticks <- ticks <- c(0,5,20,50)
+plot(sqrt(N_TOT), xlim=c(-136,-66), ylim=c(24,59), zlim=c(sqrt(0),sqrt(70)), cex.main=1.5, las=1,
+     axis.args=list(at=sqrt(ticks),labels=ticks),
+     legend.args=list(text=expression(paste("N (kg N ha"^"-1"," yr"^"-1",")")), 
+                      side=4, line=3))
+map('world',regions='usa',add=TRUE)
+mtext("Total N Input", 3, outer=FALSE, line=0.5, cex=1.5)
+label(.04, .96, "e)", cex=1.5)
+#percent biological, colfunc(10)
+colfunc <- colorRampPalette(c("white", "black"))
+plot(N_PCT_SNF*100, xlim=c(-136,-66), ylim=c(24,59), zlim=c(0,100),
+     col=tim.colors(10), 
+     cex.main=1.5, 
+     las=1, 
+     yaxt="n",
+     legend.args=list(text="% of total", side=4, line=3))
+map('world',regions='usa',add=TRUE)
+mtext("% N Input from Biological Fixation", 3, outer=FALSE, 
+      line=0.5, yaxt="n", cex=1.3)
+label(.04, .96, "f)", cex=1.5)
+dev.off()
+
+# figure 7
+# percent from trees
+setwd("/Users/Anika/Documents/GradSchool/FIA_EstimateProj/output")
+png('figure7.png', width = 10, height = 8, units = 'in', res = 300)
+colfunc <- colorRampPalette(c("grey98", "black"))
+N_PCT_tree <- (SNF_RASf*FOR_COV_ALIGN_MASK)/N_TOT*FOR_COV_ALIGN_MASK
+plot(N_PCT_tree*100, xlim=c(-136,-66), ylim=c(24,59), zlim=c(0,100),
+     xlab="longitude", 
+     ylab="latitude", 
+     col=tim.colors(100), 
+     cex.main=1.5, 
+     main="Percent N Input from SNF Trees",
+     legend.args=list(text="% of total", side=4, line=2))
+map('world',regions='usa',add=TRUE)
+dev.off()
+
+############## Sum and Mean ##############
+#Tg of N from deposition
+#mask use FOR_MASK_2_1s as zone to select all pixels
+#zonal(x, z, fun='mean', digits=0, na.rm=TRUE, ...) 
+ZON_MASK <- FOR_COV_ALIGN
+ZON_MASK[ZON_MASK>0] <- 1
+plot(ZON_MASK)
+extent(ZON_MASK)
+#ZON_MASK_1 <- ZON_MASK * SNF_NO3_MASK
+ZON_MASK_1 <- ZON_MASK * SNF_MASK
+#get areas
+ZON_AREA <- area(ZON_MASK_1)*100 #cell area in ha from unprojected grid (gives km2 then mult 100 to get ha)
+plot(ZON_AREA)
+N_Dep_kgs <- N_dep*ZON_AREA
+plot(N_Dep_kgs)
+#sum over cells
+N_Dep_T <- zonal(x=N_Dep_kgs, z=ZON_MASK_1, fun='sum')
+N_Dep_T[[2,"sum"]] #total N deposition across country
+
+#get N dep over AK
+plot(FOR_COV_ALIGN)
+AK_MASK <- ZON_MASK
+ak <- extent(-135.82,-120,50,59.38)
+AK_MASK <- crop(AK_MASK, ak)
+plot(AK_MASK, main="AK")
+AK_AREA <- area(AK_MASK)*100 #cell area in ha from unprojected grid (gives km2 then mult 100 to get ha)
+AK_N_dep <- 0.46 #kgN/ha/yr
+N_Dep_AK_kgs <- AK_N_dep*AK_AREA
+N_Dep_AK_T <- zonal(x=N_Dep_AK_kgs, z=AK_AREA, fun='sum')
+N_Dep_AK_T[[2,"sum"]] #total N deposition across AK
+
+#N dep over country
+N_Dep_T[[2,"sum"]] + N_Dep_AK_T[[2,"sum"]]
+
+#N dep mean
+z1a <- extend(ZON_MASK_1, extent(N_dep))
+zonal(x=N_dep, z=z1a, fun='mean')
+
+
+#check that SNF comes out similar to expectation
+SNF_RAS_kgs <- SNF_RAS*ZON_AREA
+N_SNF_T <- zonal(x=SNF_RAS_kgs, z=ZON_MASK_1, fun='sum')
+N_SNF_T[[2,"sum"]]
+
+#mean for SNF trees
+z1a <- extend(ZON_MASK_1, extent(SNF_RAS))
+zonal(x=SNF_RAS, z=z1a, fun='mean')
+
+#check Asymbiotic comes out similar to expectation
+N_ASYM_kgs <- N_ASYM*ZON_AREA
+N_ASYM_T <- zonal(x=N_ASYM_kgs, z=ZON_MASK_1, fun='sum')
+N_ASYM_T[[2,"sum"]]
+
+#asymbiotic mean
+z1a <- extend(ZON_MASK_1, extent(N_ASYM))
+zonal(x=N_ASYM, z=z1a, fun='mean')
+
+#check Understory comes out similar to expectation
+N_UNDER_kgs <- N_UNDER*ZON_AREA
+N_UNDER_T <- zonal(x=N_UNDER_kgs, z=ZON_MASK_1, fun='sum')
+N_UNDER_T[[2,"sum"]]
+
+#for mean 1st match extents
+z1a <- extend(ZON_MASK_1, extent(N_UNDER))
+zonal(x=N_UNDER, z=z1a, fun='mean')
+
+#total forest area
+FOR_TOT <- FOR_COV_ALIGN*ZON_AREA
+FOR_TOT_T <- zonal(x=FOR_TOT, z=ZON_MASK_1, fun='sum')
+FOR_TOT_T[[2,"sum"]]
+
+Z1 <- ZON_AREA*ZON_MASK_1
+zonal(x=Z1, z=ZON_MASK_1, fun='sum')[[2,"sum"]]
+
+############## Misc ##############
+#SNF Trees + Deposition
+N_Tree_Dep <- SNF_RAS + N_NO3_T + N_NH4_T 
+plot(N_Tree_Dep, xlab="lon", ylab="lat", 
+     main="N from SNF Trees & Deposition")
+map('world',regions='usa',add=TRUE)
+
+#Forest Percent
+plot(FOR_COV_MASK*100, xlab="lon", ylab="lat", 
+     main="Percent Forest Cover")
+map('world',regions='usa',add=TRUE)
+
+```
