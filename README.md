@@ -4,7 +4,7 @@ Scripts used to estimate tree N fixation from FIA
 Two methods were used: (1) Estimate from single time-point N-fixer abundances, and (2) estimate from N required to fulfil growth observed between two time points.
 
 Data mergning and cleaning scripts:
-<clean.R>
+`<clean.R>`
 clean_sapling.R
 functions.R
 
